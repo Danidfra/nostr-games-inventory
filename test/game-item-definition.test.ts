@@ -4,6 +4,11 @@ import {
   parseGameItemDefinitionResult,
   buildGameItemDefinitionEvent,
   validateGameItemDefinition,
+  getPrimaryItemImage,
+  getItemImageByMarker,
+  getItemImagesByMarker,
+  isGameItemImageMarker,
+  GAME_ITEM_IMAGE_MARKERS,
   KIND_GAME_ITEM_DEFINITION,
 } from "../src/index.js";
 import { makeEvent, expectOk } from "./helpers.js";
@@ -118,6 +123,8 @@ describe("parseGameItemDefinition", () => {
     expect(def?.name).toBe("Carrot");
     expect(def?.type).toBe("consumable");
     expect(def?.category).toBe("food");
+    expect(def?.image).toBe("https://example.com/carrot.png");
+    expect(def?.images).toEqual([{ url: "https://example.com/carrot.png" }]);
     expect(def?.contexts).toEqual(["game:blobbi"]);
     expect(def?.topics).toEqual(["edible", "vegetable"]);
     expect(def?.maxStack).toBe("99");
@@ -207,6 +214,275 @@ describe("parseGameItemDefinition", () => {
   });
 });
 
+describe("image tags", () => {
+  const base = [
+    ["d", "blobbi:cosmetic:wizard_hat"],
+    ["name", "Wizard Hat"],
+    ["type", "cosmetic"],
+  ];
+
+  const parseWith = (imageTags: string[][]) =>
+    parseGameItemDefinitionResult(
+      makeEvent({ kind: 31632, tags: [...base, ...imageTags] }),
+    );
+
+  it("parses a primary image with no marker", () => {
+    const result = expectOk(parseWith([["image", "https://ex.com/hat.png"]]));
+    expect(result.value.image).toBe("https://ex.com/hat.png");
+    expect(result.value.images).toEqual([{ url: "https://ex.com/hat.png" }]);
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it("parses multiple image view tags in tag order", () => {
+    const result = expectOk(
+      parseWith([
+        ["image", "https://ex.com/hat.png"],
+        ["image", "https://ex.com/hat-front.png", "front"],
+        ["image", "https://ex.com/hat-side-right.png", "side-right"],
+        ["image", "https://ex.com/hat-back.png", "back"],
+      ]),
+    );
+    expect(result.value.images).toEqual([
+      { url: "https://ex.com/hat.png" },
+      { url: "https://ex.com/hat-front.png", marker: "front" },
+      { url: "https://ex.com/hat-side-right.png", marker: "side-right" },
+      { url: "https://ex.com/hat-back.png", marker: "back" },
+    ]);
+  });
+
+  it("keeps the unmarked image as primary even when it is not first", () => {
+    const result = expectOk(
+      parseWith([
+        ["image", "https://ex.com/hat-front.png", "front"],
+        ["image", "https://ex.com/hat.png"],
+        ["image", "https://ex.com/hat-back.png", "back"],
+      ]),
+    );
+    expect(result.value.image).toBe("https://ex.com/hat.png");
+  });
+
+  it("uses the first unmarked image when several are unmarked", () => {
+    const result = expectOk(
+      parseWith([
+        ["image", "https://ex.com/first.png"],
+        ["image", "https://ex.com/second.png"],
+      ]),
+    );
+    expect(result.value.image).toBe("https://ex.com/first.png");
+    expect(result.value.images).toHaveLength(2);
+  });
+
+  it("falls back to the first marked image when none is unmarked", () => {
+    const result = expectOk(
+      parseWith([
+        ["image", "https://ex.com/hat-front.png", "front"],
+        ["image", "https://ex.com/hat-back.png", "back"],
+      ]),
+    );
+    expect(result.value.image).toBe("https://ex.com/hat-front.png");
+  });
+
+  it("leaves image undefined and images empty when there is no image tag", () => {
+    const result = expectOk(parseWith([]));
+    expect(result.value.image).toBeUndefined();
+    expect(result.value.images).toEqual([]);
+  });
+
+  it("ignores image tags with a missing or empty URL, with a warning", () => {
+    const result = expectOk(
+      parseWith([
+        ["image"],
+        ["image", ""],
+        ["image", "   ", "front"],
+        ["image", "https://ex.com/hat.png"],
+      ]),
+    );
+    expect(result.value.image).toBe("https://ex.com/hat.png");
+    expect(result.value.images).toEqual([{ url: "https://ex.com/hat.png" }]);
+    expect(
+      result.warnings.filter((w) => w.code === "invalid-image-tag"),
+    ).toHaveLength(3);
+  });
+
+  it("leaves image undefined when the only image tag is empty", () => {
+    const result = expectOk(parseWith([["image", ""]]));
+    expect(result.value.image).toBeUndefined();
+    expect(result.value.images).toEqual([]);
+  });
+
+  it("preserves an unknown marker as a string", () => {
+    const result = expectOk(
+      parseWith([
+        ["image", "https://ex.com/hat.png"],
+        ["image", "https://ex.com/hat-top.png", "top-down"],
+      ]),
+    );
+    expect(result.value.images[1]).toEqual({
+      url: "https://ex.com/hat-top.png",
+      marker: "top-down",
+    });
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it("treats a blank marker slot as unmarked", () => {
+    const result = expectOk(
+      parseWith([
+        ["image", "https://ex.com/hat-front.png", "front"],
+        ["image", "https://ex.com/hat.png", "  "],
+      ]),
+    );
+    expect(result.value.images[1]).toEqual({ url: "https://ex.com/hat.png" });
+    expect(result.value.image).toBe("https://ex.com/hat.png");
+  });
+
+  it("stays valid and parses when the item has only marked images", () => {
+    const tags = [
+      ...base,
+      ["image", "https://ex.com/hat-front.png", "front"],
+      ["image", "https://ex.com/hat-back.png", "back"],
+    ];
+    const event = makeEvent({ kind: 31632, tags });
+
+    // Authoring guidance only: the event is still a valid item definition.
+    expect(validateGameItemDefinition(event).valid).toBe(true);
+    expect(parseGameItemDefinition(event)).not.toBeNull();
+
+    const result = expectOk(parseGameItemDefinitionResult(event));
+    expect(result.value.image).toBe("https://ex.com/hat-front.png");
+    expect(result.value.images).toHaveLength(2);
+    expect(result.warnings.map((w) => w.code)).toEqual([
+      "missing-primary-image",
+    ]);
+  });
+
+  it("does not reject marked-images-only items in strict mode", () => {
+    const result = parseGameItemDefinitionResult(
+      makeEvent({
+        kind: 31632,
+        tags: [...base, ["image", "https://ex.com/hat-front.png", "front"]],
+      }),
+      { mode: "strict" },
+    );
+    expect(result.ok).toBe(true);
+    expect(result.warnings.map((w) => w.code)).toContain(
+      "missing-primary-image",
+    );
+  });
+
+  it("does not warn when exactly one unmarked image is published", () => {
+    const result = expectOk(
+      parseWith([
+        ["image", "https://ex.com/hat.png"],
+        ["image", "https://ex.com/hat-front.png", "front"],
+        ["image", "https://ex.com/hat-back.png", "back"],
+      ]),
+    );
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it("does not warn when the item has no image tag at all", () => {
+    const result = expectOk(parseWith([]));
+    expect(result.warnings).toHaveLength(0);
+  });
+
+  it("warns but stays valid when several unmarked images are published", () => {
+    const tags = [
+      ...base,
+      ["image", "https://ex.com/first.png"],
+      ["image", "https://ex.com/second.png"],
+    ];
+    const event = makeEvent({ kind: 31632, tags });
+
+    expect(validateGameItemDefinition(event).valid).toBe(true);
+
+    const result = expectOk(parseGameItemDefinitionResult(event));
+    expect(result.value.image).toBe("https://ex.com/first.png");
+    expect(result.warnings.map((w) => w.code)).toEqual([
+      "multiple-primary-images",
+    ]);
+  });
+
+  it("does not warn about a missing primary when every image tag was invalid", () => {
+    const result = expectOk(parseWith([["image", ""]]));
+    expect(result.warnings.map((w) => w.code)).toEqual(["invalid-image-tag"]);
+  });
+
+  it("does not trim non-blank image URLs or markers", () => {
+    const result = expectOk(
+      parseWith([["image", " https://ex.com/hat.png ", " front "]]),
+    );
+    expect(result.value.images).toEqual([
+      { url: " https://ex.com/hat.png ", marker: " front " },
+    ]);
+  });
+});
+
+describe("image helpers", () => {
+  const item = {
+    images: [
+      { url: "https://ex.com/hat.png" },
+      { url: "https://ex.com/hat-front.png", marker: "front" },
+      { url: "https://ex.com/hat-front-alt.png", marker: "front" },
+      { url: "https://ex.com/hat-top.png", marker: "top-down" },
+    ],
+  };
+
+  it("getPrimaryItemImage returns the unmarked image URL", () => {
+    expect(getPrimaryItemImage(item)).toBe("https://ex.com/hat.png");
+  });
+
+  it("getPrimaryItemImage falls back to the first marked image", () => {
+    expect(
+      getPrimaryItemImage({
+        images: [{ url: "https://ex.com/hat-back.png", marker: "back" }],
+      }),
+    ).toBe("https://ex.com/hat-back.png");
+  });
+
+  it("getPrimaryItemImage returns undefined without images", () => {
+    expect(getPrimaryItemImage({ images: [] })).toBeUndefined();
+  });
+
+  it("getItemImageByMarker returns the first match", () => {
+    expect(getItemImageByMarker(item, "front")).toEqual({
+      url: "https://ex.com/hat-front.png",
+      marker: "front",
+    });
+    expect(getItemImageByMarker(item, "back")).toBeUndefined();
+  });
+
+  it("getItemImagesByMarker returns every match in order", () => {
+    expect(getItemImagesByMarker(item, "front")).toEqual([
+      { url: "https://ex.com/hat-front.png", marker: "front" },
+      { url: "https://ex.com/hat-front-alt.png", marker: "front" },
+    ]);
+    expect(getItemImagesByMarker(item, "back")).toEqual([]);
+  });
+
+  it("marker helpers work with unknown markers too", () => {
+    expect(getItemImageByMarker(item, "top-down")?.url).toBe(
+      "https://ex.com/hat-top.png",
+    );
+  });
+
+  it("isGameItemImageMarker narrows only known markers", () => {
+    for (const marker of GAME_ITEM_IMAGE_MARKERS) {
+      expect(isGameItemImageMarker(marker)).toBe(true);
+    }
+    expect(GAME_ITEM_IMAGE_MARKERS).toEqual([
+      "front",
+      "side-right",
+      "side-left",
+      "back",
+      "diagonal-front-right",
+      "diagonal-front-left",
+    ]);
+    for (const value of ["top-down", "thumb", "", "FRONT", 1, null]) {
+      expect(isGameItemImageMarker(value)).toBe(false);
+    }
+  });
+});
+
 describe("buildGameItemDefinitionEvent", () => {
   it("builds a valid event template with stable tag order", () => {
     const tmpl = buildGameItemDefinitionEvent({
@@ -277,6 +553,145 @@ describe("buildGameItemDefinitionEvent", () => {
     expect(() =>
       buildGameItemDefinitionEvent({ id: "x", name: "X", type: "" }),
     ).toThrow();
+  });
+
+  it("emits the primary image followed by the marked views", () => {
+    const tmpl = buildGameItemDefinitionEvent({
+      id: "blobbi:cosmetic:wizard_hat",
+      name: "Wizard Hat",
+      type: "cosmetic",
+      image: "https://ex.com/hat.png",
+      images: [
+        { url: "https://ex.com/hat-front.png", marker: "front" },
+        { url: "https://ex.com/hat-side-left.png", marker: "side-left" },
+        { url: "https://ex.com/hat-top.png", marker: "top-down" },
+      ],
+    });
+    expect(tmpl.tags.filter((t) => t[0] === "image")).toEqual([
+      ["image", "https://ex.com/hat.png"],
+      ["image", "https://ex.com/hat-front.png", "front"],
+      ["image", "https://ex.com/hat-side-left.png", "side-left"],
+      ["image", "https://ex.com/hat-top.png", "top-down"],
+    ]);
+  });
+
+  it("accepts the primary image as an unmarked images entry", () => {
+    const tmpl = buildGameItemDefinitionEvent({
+      id: "x",
+      name: "X",
+      type: "misc",
+      images: [
+        { url: "https://ex.com/hat-front.png", marker: "front" },
+        { url: "https://ex.com/hat.png" },
+      ],
+    });
+    expect(tmpl.tags.filter((t) => t[0] === "image")).toEqual([
+      ["image", "https://ex.com/hat.png"],
+      ["image", "https://ex.com/hat-front.png", "front"],
+    ]);
+  });
+
+  it("emits only marked views when there is no primary image", () => {
+    const tmpl = buildGameItemDefinitionEvent({
+      id: "x",
+      name: "X",
+      type: "misc",
+      images: [{ url: "https://ex.com/hat-back.png", marker: "back" }],
+    });
+    expect(tmpl.tags.filter((t) => t[0] === "image")).toEqual([
+      ["image", "https://ex.com/hat-back.png", "back"],
+    ]);
+  });
+
+  it("deduplicates identical marked image tags", () => {
+    const tmpl = buildGameItemDefinitionEvent({
+      id: "x",
+      name: "X",
+      type: "misc",
+      image: "https://ex.com/hat.png",
+      images: [
+        { url: "https://ex.com/hat.png" },
+        { url: "https://ex.com/hat-front.png", marker: "front" },
+        { url: "https://ex.com/hat-front.png", marker: "front" },
+        { url: "https://ex.com/hat-front.png", marker: "back" },
+      ],
+    });
+    expect(tmpl.tags.filter((t) => t[0] === "image")).toEqual([
+      ["image", "https://ex.com/hat.png"],
+      ["image", "https://ex.com/hat-front.png", "front"],
+      ["image", "https://ex.com/hat-front.png", "back"],
+    ]);
+  });
+
+  it("omits image entries with a blank URL", () => {
+    const tmpl = buildGameItemDefinitionEvent({
+      id: "x",
+      name: "X",
+      type: "misc",
+      images: [
+        { url: "", marker: "front" },
+        { url: "  " },
+        { url: "https://ex.com/hat-back.png", marker: "back" },
+      ],
+    });
+    expect(tmpl.tags.filter((t) => t[0] === "image")).toEqual([
+      ["image", "https://ex.com/hat-back.png", "back"],
+    ]);
+  });
+
+  it("throws when two different unmarked image URLs are supplied", () => {
+    expect(() =>
+      buildGameItemDefinitionEvent({
+        id: "x",
+        name: "X",
+        type: "misc",
+        image: "https://ex.com/a.png",
+        images: [{ url: "https://ex.com/b.png" }],
+      }),
+    ).toThrow(/ambiguous primary image/);
+    expect(() =>
+      buildGameItemDefinitionEvent({
+        id: "x",
+        name: "X",
+        type: "misc",
+        images: [{ url: "https://ex.com/a.png" }, { url: "https://ex.com/b" }],
+      }),
+    ).toThrow(/ambiguous primary image/);
+  });
+
+  it("round-trips image views through the parser", () => {
+    const tmpl = buildGameItemDefinitionEvent({
+      id: "blobbi:cosmetic:wizard_hat",
+      name: "Wizard Hat",
+      type: "cosmetic",
+      image: "https://ex.com/hat.png",
+      images: [
+        { url: "https://ex.com/hat-front.png", marker: "front" },
+        { url: "https://ex.com/hat-diag.png", marker: "diagonal-front-right" },
+      ],
+    });
+    const def = parseGameItemDefinition(makeEvent({ ...tmpl }));
+    expect(def?.image).toBe("https://ex.com/hat.png");
+    expect(def?.images).toEqual([
+      { url: "https://ex.com/hat.png" },
+      { url: "https://ex.com/hat-front.png", marker: "front" },
+      { url: "https://ex.com/hat-diag.png", marker: "diagonal-front-right" },
+    ]);
+  });
+
+  it("still supports the old single-image usage", () => {
+    const tmpl = buildGameItemDefinitionEvent({
+      id: "blobbi:food:carrot",
+      name: "Carrot",
+      type: "consumable",
+      image: "https://example.com/carrot.png",
+    });
+    expect(tmpl.tags.filter((t) => t[0] === "image")).toEqual([
+      ["image", "https://example.com/carrot.png"],
+    ]);
+    const def = parseGameItemDefinition(makeEvent({ ...tmpl }));
+    expect(def?.image).toBe("https://example.com/carrot.png");
+    expect(def?.images).toEqual([{ url: "https://example.com/carrot.png" }]);
   });
 
   it("round-trips through the parser", () => {

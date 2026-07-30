@@ -31,6 +31,9 @@ export interface ParseWarning {
 export type ParseWarningCode =
   | "invalid-json-content"
   | "invalid-item-tag"
+  | "invalid-image-tag"
+  | "missing-primary-image"
+  | "multiple-primary-images"
   | "invalid-quantity"
   | "wrong-referenced-kind"
   | "malformed-address"

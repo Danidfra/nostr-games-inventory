@@ -15,6 +15,7 @@ import {
   BASED_ON_MARKER,
 } from "./address.js";
 import { validateGameItemDefinition } from "./validate.js";
+import { selectPrimaryGameItemImage, type GameItemImage } from "./images.js";
 import type { GameItemDefinition, GameItemBasedOnReference } from "./types.js";
 
 export interface ParseGameItemDefinitionOptions {
@@ -40,8 +41,13 @@ export interface ParseGameItemDefinitionOptions {
  * (wrong kind, missing/empty `d`/`name`/`type`, and invalid JSON when
  * required). Unknown tags are preserved on the event and tolerated. Invalid
  * JSON content in permissive mode produces a warning, not a rejection. Invalid
- * `based_on` references (malformed address or wrong referenced kind) are
- * ignored and reported as warnings.
+ * `based_on` references (malformed address or wrong referenced kind) and
+ * `image` tags without a usable URL are ignored and reported as warnings.
+ *
+ * Authoring guidance that the spec expresses as SHOULD is reported as warnings
+ * too, never as a rejection: an item that publishes marked image views without
+ * an unmarked primary image, or more than one unmarked image, still parses
+ * (see {@link warnAboutPrimaryImage}).
  */
 export function parseGameItemDefinitionResult(
   event: NostrEvent,
@@ -76,6 +82,8 @@ export function parseGameItemDefinitionResult(
   }
 
   const basedOn = parseBasedOnReferences(event.tags, warnings);
+  const images = parseImages(event.tags, warnings);
+  warnAboutPrimaryImage(images, warnings);
 
   const definition: GameItemDefinition = {
     id,
@@ -84,6 +92,7 @@ export function parseGameItemDefinitionResult(
     kind: KIND_GAME_ITEM_DEFINITION,
     name,
     type,
+    images,
     contexts: getTagValues(event.tags, "context"),
     topics: getTagValues(event.tags, "t"),
     basedOn,
@@ -92,7 +101,7 @@ export function parseGameItemDefinitionResult(
   };
 
   assignOptional(definition, "category", getTagValue(event.tags, "category"));
-  assignOptional(definition, "image", getTagValue(event.tags, "image"));
+  assignOptional(definition, "image", selectPrimaryGameItemImage(images)?.url);
   assignOptional(definition, "model3d", getTagValue(event.tags, "model_3d"));
   assignOptional(definition, "audio", getTagValue(event.tags, "audio"));
   assignOptional(definition, "symbol", getTagValue(event.tags, "symbol"));
@@ -120,6 +129,81 @@ export function parseGameItemDefinition(
 ): GameItemDefinition | null {
   const result = parseGameItemDefinitionResult(event, options);
   return result.ok ? result.value : null;
+}
+
+/**
+ * Parse every `image` tag into a {@link GameItemImage}, in tag order.
+ *
+ * `["image", "<url>"]` is an unmarked image (a primary image candidate) and
+ * `["image", "<url>", "<marker>"]` is a marked view. A blank marker slot is
+ * treated as no marker; unknown markers are preserved verbatim so clients that
+ * understand them keep working. Tags whose URL is missing or blank are ignored
+ * and reported as `invalid-image-tag` warnings.
+ */
+function parseImages(
+  tags: string[][],
+  warnings: ParseWarning[],
+): GameItemImage[] {
+  const images: GameItemImage[] = [];
+  for (const tag of tags) {
+    if (tag[0] !== "image") {
+      continue;
+    }
+
+    const url = tag[1];
+    if (typeof url !== "string" || url.trim() === "") {
+      warnings.push({
+        code: "invalid-image-tag",
+        message: "`image` tag is missing a URL; ignored",
+        tag,
+      });
+      continue;
+    }
+
+    const marker = tag[2];
+    images.push(
+      typeof marker === "string" && marker.trim() !== ""
+        ? { url, marker }
+        : { url },
+    );
+  }
+  return images;
+}
+
+/**
+ * Warn when an item does not publish exactly one unmarked `image` tag.
+ *
+ * The spec only says an item definition SHOULD publish exactly one unmarked
+ * image, so this never rejects the event and never changes the parsed value —
+ * including in strict mode. Marked images are pose/view-specific assets, so an
+ * item with views but no canonical image (`missing-primary-image`) leaves
+ * clients that ignore markers guessing, and several unmarked images
+ * (`multiple-primary-images`) make the canonical one ambiguous. In both cases
+ * the parser still resolves `image` via {@link selectPrimaryGameItemImage}.
+ *
+ * An item with no `image` tag at all is not warned about: images are optional.
+ */
+function warnAboutPrimaryImage(
+  images: GameItemImage[],
+  warnings: ParseWarning[],
+): void {
+  const unmarked = images.filter((image) => image.marker === undefined);
+
+  if (images.length > 0 && unmarked.length === 0) {
+    warnings.push({
+      code: "missing-primary-image",
+      message:
+        "Item has only marked `image` views and no unmarked primary image; falling back to the first image",
+    });
+    return;
+  }
+
+  if (unmarked.length > 1) {
+    warnings.push({
+      code: "multiple-primary-images",
+      message: `Item has ${unmarked.length} unmarked \`image\` tags; using the first as the primary image`,
+    });
+  }
 }
 
 /**

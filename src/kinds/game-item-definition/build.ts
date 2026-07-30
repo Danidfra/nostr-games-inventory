@@ -5,6 +5,7 @@ import {
 } from "../../common/constants.js";
 import { serializeContent } from "../../common/json.js";
 import { BASED_ON_MARKER, parseGameItemAddress } from "./address.js";
+import type { GameItemImage } from "./images.js";
 import type { BuildGameItemDefinitionInput } from "./types.js";
 
 /**
@@ -38,6 +39,8 @@ const MANAGED_TAG_NAMES = new Set<string>([
  * - validates `maxStack` (positive decimal integer) and numeric `version`
  *   (finite);
  * - validates every `basedOn` reference (well-formed kind:31632 coordinate);
+ * - emits one unmarked primary `image` tag followed by the marked image views,
+ *   deduplicating identical image tags (see {@link pushImageTags});
  * - never creates `id` or `sig`;
  * - emits tags in a stable, deterministic order to simplify testing;
  * - rejects `extraTags` that conflict with builder-managed tags (see
@@ -49,8 +52,8 @@ const MANAGED_TAG_NAMES = new Set<string>([
  * Valid values are never trimmed or otherwise mutated.
  *
  * @throws {Error} if a required field is missing/blank, an optional numeric
- * field is invalid, a `basedOn` reference is invalid, or an `extraTags` entry
- * conflicts with a builder-managed tag.
+ * field is invalid, a `basedOn` reference is invalid, the primary image is
+ * ambiguous, or an `extraTags` entry conflicts with a builder-managed tag.
  */
 export function buildGameItemDefinitionEvent(
   input: BuildGameItemDefinitionInput,
@@ -66,7 +69,7 @@ export function buildGameItemDefinitionEvent(
   ];
 
   pushOptional(tags, "category", input.category);
-  pushOptional(tags, "image", input.image);
+  pushImageTags(tags, input.image, input.images);
   pushOptional(tags, "model_3d", input.model3d);
   pushOptional(tags, "audio", input.audio);
   pushOptional(tags, "symbol", input.symbol);
@@ -133,6 +136,62 @@ function pushOptional(
 ): void {
   if (value !== undefined && !isBlank(value)) {
     tags.push([name, value]);
+  }
+}
+
+/**
+ * Emit the `image` tags: one unmarked primary image followed by the marked
+ * views, in the order they were supplied.
+ *
+ * The primary image is `image`, or the first unmarked entry of `images`.
+ * Entries with a blank URL are omitted (like other repeatable values) and
+ * exact duplicates (same URL and marker) are emitted only once. A blank marker
+ * is treated as no marker.
+ *
+ * @throws {Error} when two different unmarked URLs are supplied, since that
+ * leaves the primary image ambiguous.
+ */
+function pushImageTags(
+  tags: string[][],
+  image: string | undefined,
+  images: GameItemImage[] | undefined,
+): void {
+  const views: { url: string; marker: string }[] = [];
+  let primary: string | undefined =
+    image !== undefined && !isBlank(image) ? image : undefined;
+
+  for (const entry of images ?? []) {
+    const url = entry.url;
+    if (typeof url !== "string" || isBlank(url)) {
+      continue;
+    }
+
+    const marker = entry.marker;
+    if (marker === undefined || isBlank(marker)) {
+      if (primary !== undefined && primary !== url) {
+        throw new Error(
+          `buildGameItemDefinitionEvent: ambiguous primary image; two different unmarked image URLs were supplied: ${primary} and ${url}`,
+        );
+      }
+      primary = url;
+      continue;
+    }
+
+    views.push({ url, marker });
+  }
+
+  if (primary !== undefined) {
+    tags.push(["image", primary]);
+  }
+
+  const seen = new Set<string>();
+  for (const view of views) {
+    const key = JSON.stringify([view.marker, view.url]);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    tags.push(["image", view.url, view.marker]);
   }
 }
 

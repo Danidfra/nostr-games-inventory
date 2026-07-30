@@ -10,9 +10,9 @@ It provides constants, types, parsers, builders, validators and helpers for
 these kinds. It is pure, has no import-time side effects, no framework or
 application dependencies, and works in both browser and Node environments.
 
-> Status: `private` (not published to npm). This is the protocol layer only.
-> No React, hooks, UI, relay clients, signers, encryption, grants, placement,
-> equipment, persistence, or publishing are included in this phase.
+> Status: published to npm. This is the protocol layer only. No React, hooks,
+> UI, relay clients, signers, encryption, grants, placement, equipment,
+> persistence, or publishing are included in this phase.
 
 ## Design principles
 
@@ -24,12 +24,23 @@ application dependencies, and works in both browser and Node environments.
   structural `NostrEvent` interface, so any compatible event object (e.g. from
   `nostr-tools`) can be passed in without adding a dependency.
 
-## Install (local / workspace only)
+## Install
+
+```bash
+pnpm add @nostr-games/inventory
+# or: npm i @nostr-games/inventory
+```
+
+Ships ESM + CJS + type declarations; no runtime dependencies. Node >= 18.
+
+To work on the library itself:
 
 ```bash
 pnpm install
 pnpm run build
 ```
+
+See [CHANGELOG.md](./CHANGELOG.md) for release notes.
 
 ## Public API
 
@@ -94,6 +105,79 @@ buildGameItemDefinitionEvent(input): UnsignedEventTemplate<31632>
 validateGameItemDefinition(event, options?): ItemDefinitionValidationResult
 ```
 
+#### Item images
+
+`image` is a repeatable tag. An `image` tag with no marker is the primary
+(default) image; an `image` tag with a third element carries a **view marker**:
+
+```json
+["image", "https://ex.com/hat.png"]
+["image", "https://ex.com/hat-front.png", "front"]
+```
+
+Markers defined by this version (`GAME_ITEM_IMAGE_MARKERS`): `front`,
+`side-right`, `side-left`, `back`, `diagonal-front-right`,
+`diagonal-front-left`. Unknown markers are preserved verbatim, never dropped.
+There is **no** `thumb` tag and no spritesheet/turnaround format in this
+version.
+
+A parsed definition exposes both shapes:
+
+```ts
+def.image; // string | undefined — the primary image URL
+def.images; // GameItemImage[]    — every valid image tag, in tag order
+```
+
+`image` is the first unmarked image, falling back to the first image when every
+image is marked, and `undefined` when there is no valid image tag. Image tags
+with a missing or blank URL are ignored with an `invalid-image-tag` warning.
+
+**Authoring guidance.** Official item definitions SHOULD publish **exactly one
+unmarked `image` tag**. That image is the canonical/default one: clients SHOULD
+use it for inventory, shop, list and card UI, and clients that do not
+understand view markers will use it. Marked images are pose/view-specific
+assets — they are not replacements for the primary image, and the fallback to
+the first marked view applies **only** when no unmarked image exists.
+
+This is guidance, not a requirement: an item with only marked images (or none
+at all) is still valid and parses normally. The parser reports the two
+authoring problems as non-fatal warnings, in both permissive and strict mode:
+
+| Warning                   | When                                               |
+| ------------------------- | -------------------------------------------------- |
+| `missing-primary-image`   | valid image tags exist, but all of them are marked |
+| `multiple-primary-images` | more than one unmarked image tag                   |
+
+Neither warning rejects the event, changes `image`/`images`, or makes `image`
+required (an item with no image tag at all is not warned about).
+
+```ts
+getPrimaryItemImage(item): string | undefined
+getItemImageByMarker(item, marker): GameItemImage | undefined
+getItemImagesByMarker(item, marker): GameItemImage[]
+isGameItemImageMarker(value): value is GameItemImageMarker
+```
+
+The builder takes the primary image as `image` and the views as `images`:
+
+```ts
+buildGameItemDefinitionEvent({
+  id: "blobbi:cosmetic:wizard_hat",
+  name: "Wizard Hat",
+  type: "cosmetic",
+  image: "https://ex.com/hat.png",
+  images: [
+    { url: "https://ex.com/hat-front.png", marker: "front" },
+    { url: "https://ex.com/hat-back.png", marker: "back" },
+  ],
+});
+```
+
+It emits the primary image first, then the marked views in order, skipping
+blank URLs and duplicate identical image tags. An unmarked entry in `images`
+also counts as the primary image; supplying two _different_ unmarked URLs
+throws, since the primary image would be ambiguous.
+
 ### Kind 31633 — Game Inventory
 
 ```ts
@@ -138,7 +222,12 @@ Parsers come in two flavors so failures are never silently hidden:
   - `ok: true` + `value` for a valid event, plus `warnings[]` describing
     **valid events with invalid tags that were ignored** and other recoverable
     issues (e.g. `invalid-quantity`, `malformed-address`,
-    `wrong-referenced-kind`, `invalid-json-content`, `duplicate-item`).
+    `wrong-referenced-kind`, `invalid-json-content`, `invalid-image-tag`,
+    `missing-primary-image`, `multiple-primary-images`, `duplicate-item`).
+
+Warnings also carry SHOULD-level authoring guidance (e.g. the primary-image
+warnings above). They never affect the parsed value and never reject the event,
+including in strict mode.
 
 ### Content JSON
 
@@ -236,6 +325,12 @@ These were resolved explicitly rather than silently:
    the spec's three allowed strategies.
 6. **Invalid JSON `content`.** Only rejected when JSON is required
    (`requireJsonContent` / strict mode); otherwise a warning.
+7. **Primary image when the `image` tag repeats.** The spec says an item
+   "SHOULD" have exactly one unmarked `image` tag but does not require it.
+   Parsing therefore picks the first unmarked image, falls back to the first
+   image when all of them are marked, and treats a blank marker slot as no
+   marker — and reports the deviation as a warning rather than an error, so
+   authoring tools can flag it without any client rejecting the item.
 
 ## Project structure
 
@@ -251,7 +346,7 @@ src/
     result.ts                    # ParseMode / ParseResult / warnings
   kinds/
     game-item-definition/        # kind 31632
-      { types, constants via common, address, validate, parse, build, index }
+      { types, images, address, validate, parse, build, index }
     game-inventory/              # kind 31633
       { types, address, quantity, validate, parse, build, helpers, index }
 test/                            # vitest suites

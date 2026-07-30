@@ -44,6 +44,7 @@ Events that represent historical actions, such as granting an item to a user or 
     ["type", "<item-type>"],
     ["category", "<category>"],
     ["image", "<url>"],
+    ["image", "<url>", "<view-marker>"],
     ["model_3d", "<url>"],
     ["audio", "<url>"],
     ["context", "<context>"],
@@ -143,13 +144,88 @@ ammo
 
 ### `image`
 
-The `image` tag contains the primary image URL for the item.
+The `image` tag contains an image URL for the item. It MAY be repeated.
+
+An `image` tag with no marker is the primary (default) image:
 
 ```
 ["image", "<url>"]
 ```
 
-Clients SHOULD use this image as the default icon or visual preview for the item.
+An `image` tag MAY carry a view marker as its third element to describe an additional view of the same item:
+
+```
+["image", "<url>", "<marker>"]
+```
+
+Example:
+
+```json
+[
+  ["image", "https://example.com/items/wizard-hat.png"],
+  ["image", "https://example.com/items/wizard-hat-front.png", "front"],
+  [
+    "image",
+    "https://example.com/items/wizard-hat-side-right.png",
+    "side-right"
+  ],
+  ["image", "https://example.com/items/wizard-hat-back.png", "back"]
+]
+```
+
+#### Primary image
+
+An item definition SHOULD publish exactly one `image` tag with no marker.
+
+That unmarked image is the canonical/default image of the item. Clients SHOULD use it for inventory, shop, list, card and other compact previews, and it is the image clients that do not understand view markers will use. Such UIs SHOULD NOT pick a marked view instead.
+
+To resolve the primary image, clients SHOULD:
+
+1. use the first `image` tag with no marker;
+2. if every `image` tag is marked, fall back to the first valid `image` tag;
+3. if there is no usable `image` tag, treat the item as having no image.
+
+Step 2 is a rendering fallback only. It exists so an item that ships views but no canonical image still renders; it does not promote a marked view to canonical.
+
+##### Authoring guidance
+
+The `image` tag is optional, and an item definition that contains only marked images is still a **valid** item definition — clients MUST NOT reject it (see [Validation](#validation)).
+
+Nevertheless, official item definitions SHOULD publish exactly one unmarked `image` tag. Publishing only marked views, or several unmarked images, forces every client to guess which asset is canonical, and the two failure modes differ:
+
+- **no unmarked image** — clients that ignore markers fall back to whichever view happens to be first, which may be a back or side pose;
+- **several unmarked images** — the canonical image is ambiguous and different clients may pick differently.
+
+Clients and tooling MAY surface either case as a non-fatal warning to the issuer.
+
+#### View markers
+
+The following view markers are defined by this version:
+
+```
+front
+side-right
+side-left
+back
+diagonal-front-right
+diagonal-front-left
+```
+
+Markers describe the camera angle on the item, not a size, crop, or animation frame.
+
+Marked images are pose/view-specific assets, used for detail views, previews, dressing rooms, turn-around style UI and 3D-ish presentation. They are **not** replacements for the primary image and SHOULD NOT be used where the canonical image belongs.
+
+The marker slot is a hint. Clients MAY ignore markers they do not understand, and MUST NOT reject an item definition because of an unknown marker. Clients SHOULD tolerate an item that provides only some of the markers, repeats a marker, or provides no marked views at all.
+
+An `image` tag whose URL is missing or empty SHOULD be ignored.
+
+#### Not defined in this version
+
+- There is no separate `thumb` or `icon` tag. Clients that need a thumbnail SHOULD derive it from the primary image.
+- There is no spritesheet or turnaround format.
+- There is no animation, placement or equipment schema.
+
+These may be added by a future version. Because unknown tags and unknown markers are tolerated, adding them later is backwards compatible.
 
 ### `context`
 
@@ -412,6 +488,7 @@ Because `kind:31632` is addressable, the latest event for a given `31632:<pubkey
 Safe updates include:
 
 - fixing image URLs
+- adding marked `image` view tags
 - fixing spelling
 - adding translations
 - adding topics
@@ -441,6 +518,11 @@ Clients SHOULD reject a `kind:31632` event as an item definition if:
 Clients SHOULD tolerate:
 
 - unknown tags
+- multiple `image` tags
+- unknown `image` view markers
+- `image` tags with a missing or empty URL (ignore the tag, keep the event)
+- items with only marked images and no unmarked primary image
+- items with more than one unmarked `image` tag (use the first)
 - multiple `context` tags
 - multiple `t` tags
 - multiple `a` tags
@@ -485,6 +567,13 @@ Clients SHOULD tolerate:
     ["type", "cosmetic"],
     ["category", "headwear"],
     ["image", "https://example.com/items/wizard-hat.png"],
+    ["image", "https://example.com/items/wizard-hat-front.png", "front"],
+    [
+      "image",
+      "https://example.com/items/wizard-hat-side-right.png",
+      "side-right"
+    ],
+    ["image", "https://example.com/items/wizard-hat-back.png", "back"],
     ["model_3d", "https://example.com/items/wizard_hat.glb"],
     ["audio", "https://example.com/sounds/equip.wav"],
     ["context", "game:blobbi"],

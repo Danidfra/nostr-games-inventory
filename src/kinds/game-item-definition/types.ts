@@ -1,5 +1,6 @@
 import type { NostrEvent } from "../../nostr/event.js";
 import type { KindGameItemDefinition } from "../../common/constants.js";
+import type { GameItemImage } from "./images.js";
 
 /**
  * A derivation reference declared with an `a` tag marked `based_on`.
@@ -33,7 +34,13 @@ export interface GameItemDefinition {
 
   /** Optional `category` tag. */
   category?: string;
-  /** Optional `image` tag. */
+  /**
+   * The primary/default image URL: the first `image` tag with no view marker,
+   * falling back to the first valid `image` tag when every image is marked.
+   * `undefined` when the item has no valid `image` tag.
+   *
+   * Inventory and list UIs SHOULD use this image.
+   */
   image?: string;
   /** Optional `model_3d` tag. */
   model3d?: string;
@@ -50,6 +57,11 @@ export interface GameItemDefinition {
   /** Optional `alt` tag. */
   alt?: string;
 
+  /**
+   * Every valid `image` tag in tag order, including the primary image and any
+   * marked views. Image tags with a missing or blank URL are ignored.
+   */
+  images: GameItemImage[];
   /** All `context` tag values (repeatable). */
   contexts: string[];
   /** All `t` topic tag values (repeatable). */
@@ -85,7 +97,22 @@ export interface BuildGameItemDefinitionInput {
   type: string;
 
   category?: string;
+  /**
+   * The primary/default image, emitted as an unmarked `["image", "<url>"]`
+   * tag. May also be supplied as an unmarked entry in {@link images}.
+   */
   image?: string;
+  /**
+   * Additional image tags. Entries with a marker are emitted as
+   * `["image", "<url>", "<marker>"]` view tags; an unmarked entry is treated
+   * as the primary image (equivalent to {@link image}).
+   *
+   * Entries with a blank URL are omitted, like other repeatable values.
+   * Exact duplicates (same URL and marker) are emitted only once. Supplying
+   * two different unmarked URLs — whether across `image` and `images` or
+   * within `images` — is an ambiguous primary image and throws.
+   */
+  images?: GameItemImage[];
   model3d?: string;
   audio?: string;
   symbol?: string;

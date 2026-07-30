@@ -1,6 +1,6 @@
 {
   "name": "@nostr-games/inventory",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Framework-independent TypeScript library for Nostr game item definitions (kind:31632) and game inventories (kind:31633).",
   "license": "MIT",
   "type": "module",
@@ -17,8 +17,18 @@
   "types": "./dist/index.d.ts",
   "files": [
     "dist",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Danidfra/nostr-games-inventory.git"
+  },
+  "homepage": "https://github.com/Danidfra/nostr-games-inventory#readme",
+  "bugs": {
+    "url": "https://github.com/Danidfra/nostr-games-inventory/issues"
+  },
   "engines": {
     "node": ">=18"
   },
