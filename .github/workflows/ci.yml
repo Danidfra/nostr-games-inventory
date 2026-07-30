@@ -10,11 +10,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # Must run before setup-node: `cache: pnpm` invokes `pnpm store path`.
+      # Version is taken from the `packageManager` field in package.json.
       - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          run_install: false
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
           cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
       - run: pnpm install --frozen-lockfile
       - run: pnpm run typecheck
       - run: pnpm run lint
