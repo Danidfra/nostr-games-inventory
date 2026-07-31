@@ -39,7 +39,20 @@ export type ParseWarningCode =
   | "malformed-address"
   | "duplicate-item"
   | "invalid-grant-tag"
-  | "empty-required-value";
+  | "empty-required-value"
+  // kind:31634 Game Item Placement
+  | "invalid-placement-entry"
+  | "duplicate-placement-id"
+  | "duplicate-equip-slot"
+  | "unknown-placement-mode"
+  | "invalid-reference"
+  | "missing-reference"
+  | "missing-target"
+  | "target-mismatch"
+  | "duplicate-target-tag"
+  | "missing-item-tag"
+  | "orphaned-item-tag"
+  | "duplicate-item-tag";
 
 /**
  * Structured parse result.

@@ -2,3 +2,7 @@ dist
 node_modules
 coverage
 pnpm-lock.yaml
+
+# Local, git-ignored tool settings. CI never sees them, so `format:check`
+# should not fail on them locally either.
+.claude

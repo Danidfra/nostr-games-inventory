@@ -2,10 +2,15 @@
  * @nostr-games/inventory
  *
  * Framework-independent TypeScript library implementing:
- * - kind:31632 Game Item Definition
- * - kind:31633 Game Inventory
+ * - kind:31632 Game Item Definition — what an item is
+ * - kind:31633 Game Inventory — which items are held, and how many
+ * - kind:31634 Game Item Placement — where items are equipped or placed
  *
- * Pure functions only, no import-time side effects.
+ * These are three separate responsibilities:
+ * definition != ownership != placement.
+ *
+ * Pure functions only, no import-time side effects. Nothing here signs,
+ * publishes, fetches, or decides whether a placement is authorized.
  */
 
 // Nostr event types
@@ -15,8 +20,10 @@ export type { NostrEvent, UnsignedEventTemplate } from "./nostr/event.js";
 export {
   KIND_GAME_ITEM_DEFINITION,
   KIND_GAME_INVENTORY,
+  KIND_GAME_ITEM_PLACEMENT,
   type KindGameItemDefinition,
   type KindGameInventory,
+  type KindGameItemPlacement,
 } from "./common/constants.js";
 
 // Shared parse result / mode types
@@ -50,3 +57,6 @@ export * from "./kinds/game-item-definition/index.js";
 
 // kind:31633 Game Inventory
 export * from "./kinds/game-inventory/index.js";
+
+// kind:31634 Game Item Placement
+export * from "./kinds/game-item-placement/index.js";

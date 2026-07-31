@@ -174,7 +174,9 @@ Examples:
 ["context", "character:blobbi"]
 ```
 
-`context` SHOULD be used for filtering and UI grouping.
+`context` SHOULD be used for local filtering, UI grouping and metadata discovery.
+
+Note that `context` is not a standard single-letter indexable tag, so relays are not expected to answer `#context` queries. Clients SHOULD fetch inventories by author, `#d` or `#a` and group by `context` locally. This is a documentation clarification only: the event model is unchanged.
 
 The `d` tag identifies the specific inventory. The `context` tag identifies the broader category.
 

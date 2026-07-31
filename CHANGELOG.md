@@ -6,6 +6,74 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the major version is `0`, minor bumps may add public API but aim to stay
 backward compatible.
 
+## 0.3.0 (unreleased)
+
+Adds **kind:31634 Game Item Placement**. Backward compatible: every 31632,
+image and 31633 API behaves exactly as before, and no existing type changed.
+
+### Added
+
+- **kind:31634 Game Item Placement** — where referenced items are currently
+  equipped or placed. `KIND_GAME_ITEM_PLACEMENT`, `buildGameItemPlacementAddress`,
+  `parseGameItemPlacementAddress`.
+- **Parsing**: `parseGameItemPlacement`, `parseGameItemPlacementResult`,
+  `validateGameItemPlacement`. `content` MUST be a JSON object and is
+  authoritative; the `a` tags are a derived index.
+- **Builder**: `buildGameItemPlacementEvent` plus
+  `toBuildGameItemPlacementInput` for lossless round-tripping. Derives one
+  `["a", …, "item"]` tag per unique item address in first-placement order, at
+  most one canonical target tag, strips stale managed tags from `preserveTags`,
+  and produces byte-identical output for identical input.
+- **Target union**: `GameItemPlacementTarget` — `address`, `internal`, or an
+  unknown type preserved verbatim — with `isAddressPlacementTarget` /
+  `isInternalPlacementTarget`.
+- **References and transforms**: 2D/3D `GameItemPlacementReference`,
+  `GameItemPlacementPosition`, Euler and quaternion rotations,
+  `GameItemPlacementScale`, `GameItemPlacementFlip`, and guards
+  `isGameItemPlacement2DReference`, `isGameItemPlacement3DReference`,
+  `isGameItemPlacementEulerRotation`, `isGameItemPlacementQuaternionRotation`.
+  Every transform number must be finite; nothing is normalized or clamped.
+- **Modes**: `GAME_ITEM_PLACEMENT_MODES` (`equip`, `place`) and
+  `isGameItemPlacementMode`. Unknown modes stay valid.
+- **Query helpers**: `getPlacementItems`, `getPlacementById`,
+  `getPlacementsByItem`, `getPlacementsBySlot`,
+  `getFirstEquippedPlacementBySlot`, `getLastEquippedPlacementBySlot`.
+- **Immutable mutation helpers**: `addPlacement`, `replacePlacement`,
+  `removePlacement`, `setEquippedPlacementForSlot` (deterministic last-wins),
+  `removeEquippedPlacementFromSlot`.
+- **Tag / query helpers**: `isPlacementItemTag`, `isPlacementTargetTag`,
+  `getPlacementItemTags`, `getPlacementTargetTags`,
+  `buildGameItemPlacementFilter`, `filterEventsByPlacementItemAddress`. Relays
+  cannot filter `#a` by marker, so local narrowing is documented and provided.
+- **Revision helper**: `compareGameItemPlacementRevisions` →
+  `unknown | stale | equivalent | conflict | ahead`. `created_at` is never used
+  to break an equal-revision tie and JSON is never re-canonicalized.
+- **12 new parse warning codes** on `ParseWarningCode`:
+  `invalid-placement-entry`, `duplicate-placement-id`, `duplicate-equip-slot`,
+  `unknown-placement-mode`, `invalid-reference`, `missing-reference`,
+  `missing-target`, `target-mismatch`, `duplicate-target-tag`,
+  `missing-item-tag`, `orphaned-item-tag`, `duplicate-item-tag`.
+- **`docs/31634-game-item-placement.md`** — the protocol draft, written
+  alongside this implementation.
+
+### Changed
+
+- `docs/31633-game-inventory.md`: the `context` tag is now documented as being
+  for **local** filtering, UI grouping and metadata discovery, since relays are
+  not expected to index a non-single-letter `context` tag. Documentation only —
+  the event model is unchanged.
+- README documents all three kinds, the responsibility boundaries, the
+  authorization boundary, and the 31634 design decisions.
+- README no longer claims builders "normalize quantities (floor, clamp)"; they
+  validate and throw, which is what the code has always done.
+
+### Boundaries (unchanged by this release)
+
+The package still never signs, publishes, fetches, or decides authorization. A
+placement does not define an item, prove ownership, grant, spend, consume,
+authorize itself, or decide whether anything renders. Equipping consumes no
+inventory quantity.
+
 ## 0.2.0
 
 Adds repeatable `image` tag support to **kind:31632 Game Item Definition**.

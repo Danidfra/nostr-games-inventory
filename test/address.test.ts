@@ -6,6 +6,8 @@ import {
   parseGameItemAddress,
   buildGameInventoryAddress,
   parseGameInventoryAddress,
+  buildGameItemPlacementAddress,
+  parseGameItemPlacementAddress,
   getDTag,
 } from "../src/index.js";
 
@@ -86,6 +88,55 @@ describe("game inventory address", () => {
 
   it("rejects a non-31633 address", () => {
     expect(parseGameInventoryAddress("31632:pk:id")).toBeNull();
+  });
+});
+
+describe("game item placement address", () => {
+  it("round-trips", () => {
+    const addr = buildGameItemPlacementAddress("pk", "placement:equipment");
+    expect(addr).toBe("31634:pk:placement:equipment");
+    expect(parseGameItemPlacementAddress(addr)).toEqual({
+      kind: 31634,
+      pubkey: "pk",
+      placementId: "placement:equipment",
+    });
+  });
+
+  it("preserves colons inside the d value", () => {
+    const id = "blobbi-island:character:char-1:equipment";
+    const addr = buildGameItemPlacementAddress("pk", id);
+    expect(addr).toBe(`31634:pk:${id}`);
+    expect(parseGameItemPlacementAddress(addr)?.placementId).toBe(id);
+  });
+
+  it("rejects a non-31634 address", () => {
+    expect(parseGameItemPlacementAddress("31633:pk:id")).toBeNull();
+    expect(parseGameItemPlacementAddress("31632:pk:id")).toBeNull();
+  });
+
+  it("rejects malformed addresses and an empty d", () => {
+    expect(parseGameItemPlacementAddress("31634:pk")).toBeNull();
+    expect(parseGameItemPlacementAddress("31634:pk:")).toBeNull();
+    expect(parseGameItemPlacementAddress("31634::id")).toBeNull();
+    expect(parseGameItemPlacementAddress("abc:pk:id")).toBeNull();
+    expect(parseGameItemPlacementAddress("")).toBeNull();
+  });
+
+  it("optionally requires a hex pubkey", () => {
+    const hex = "b".repeat(64);
+    expect(
+      parseGameItemPlacementAddress(`31634:${hex}:id`, {
+        requireHexPubkey: true,
+      }),
+    ).not.toBeNull();
+    expect(
+      parseGameItemPlacementAddress("31634:pk:id", { requireHexPubkey: true }),
+    ).toBeNull();
+  });
+
+  it("throws when building with an empty pubkey or id", () => {
+    expect(() => buildGameItemPlacementAddress("", "id")).toThrow();
+    expect(() => buildGameItemPlacementAddress("pk", "")).toThrow();
   });
 });
 
