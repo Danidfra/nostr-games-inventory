@@ -56,6 +56,36 @@ Examples:
 
 Clients SHOULD treat the latest event for the same `31633:<owner-pubkey>:<d-tag>` as the current inventory state.
 
+### `d` is an opaque, application-defined inventory context
+
+The `d` tag is an **opaque application-defined label for one inventory context**. It is not a globally shared inventory identifier, and this specification does not define, reserve, or recommend any particular value.
+
+A player MAY own **any number** of `kind:31633` events with different `d` values, all valid at the same time. There is no canonical, primary, or default inventory. Generic shapes an application might use include:
+
+```text
+a game inventory
+a backpack
+a chest or other container
+a character-specific inventory
+a vault or bank
+```
+
+Applications decide, as their own policy and not as a protocol rule, which contexts they write, read, aggregate, display, and allow gameplay interactions with. Two applications MAY agree to share a context, and an application MAY keep a context to itself; the protocol distinguishes neither case.
+
+Implementations MUST NOT assume that a player has exactly one inventory, and MUST NOT treat an unfamiliar `d` value as invalid.
+
+### Discovering a player's inventories
+
+Because `kind:31633` is addressable, a relay indexes it by author and kind. A client that knows only a pubkey can therefore enumerate **every** inventory that player owns, without knowing any `d` value in advance:
+
+```json
+{ "kinds": [31633], "authors": ["<pubkey>"] }
+```
+
+This returns the newest event for each distinct `d`. No separate index event is required, and none is defined.
+
+Clients SHOULD prefer this query when displaying or aggregating what a player owns. Pinning a read to a single `#d` is a write-side convention leaking into the read side: it makes a client structurally unable to observe any inventory but its own.
+
 ## Required tags
 
 ### `d`
@@ -374,11 +404,79 @@ Clients SHOULD NOT publish partial inventory diffs using `kind:31633`.
 
 Partial changes, receipts, grants, spends, or conversions SHOULD be represented by separate regular events.
 
+### Preserving data a writer does not own
+
+Because a publish REPLACES the whole event, every tag and the `content` field are rewritten each time. Any data the writing application does not reproduce is destroyed permanently, for every other client as well as itself.
+
+A client publishing an updated inventory therefore MUST preserve:
+
+```text
+item references it did not intend to change
+context, name and alt tags
+grant references
+the content field
+every tag it does not recognise
+```
+
+Unrecognised tags are the most easily lost and the most damaging to lose: another application may be using one to record state — a one-time allocation marker, a migration flag — whose meaning is invisible to the writer. A rewrite that drops such a tag can silently re-arm an operation that was meant to happen exactly once.
+
+Clients SHOULD implement this as a round-trip: parse the newest event, apply the change to the parsed state, and rebuild from that state plus the original tags, rather than constructing a fresh event from the few fields the writer happens to care about.
+
+## Optional revision
+
+An inventory MAY carry an advisory revision counter.
+
+```json
+["revision", "<non-negative-integer>"]
+```
+
+The value MUST be a canonical non-negative decimal integer string. `"0"` is valid. Leading zeros, negative values, decimals, exponent notation and surrounding whitespace are invalid.
+
+A writer that uses revisions reads the current inventory and publishes `previous + 1`. A writer that does not care MAY omit the tag entirely; the tag is OPTIONAL and its absence is normal.
+
+### What a revision provides
+
+It lets a **later reader** notice that two states disagree, instead of a lost update passing silently:
+
+```text
+two valid, different revisions   -> the states can be ordered
+the same revision, different state -> a fork or a lost update occurred
+```
+
+### What a revision does NOT provide
+
+```text
+it is not a lock
+it is not compare-and-swap
+it does not prevent concurrent writes
+it does not replace addressable-event resolution
+it cannot detect anything against a peer that omits the tag
+it does not define how to merge
+```
+
+Relays continue to keep the newest event per `(kind, pubkey, d)` regardless of any revision. Resolving a detected conflict is an application decision, and this specification continues to advise against merging item tags across versions.
+
+### Comparing two states
+
+Two states carrying the same valid revision SHOULD be treated as the same state only on hard evidence: the same event id, or byte-identical tags. Otherwise they SHOULD be reported as conflicting.
+
+Implementations MUST NOT use `created_at` to break an equal-revision tie. Wall-clock timestamps are publisher- and clock-skew-controlled, so using one would silently pick a winner where the honest answer is "these two states conflict".
+
+Implementations MUST NOT sort, normalize or re-derive tags before comparing them. Two tag lists that would normalize alike are still two different documents.
+
+### Handling a malformed revision
+
+A malformed `revision` value MUST NOT invalidate the inventory in permissive parsing. It SHOULD be ignored with a warning, leaving the revision absent — which comparison then reports as "unknown", the safe fallback. A strict-mode parser MAY reject the event.
+
+Rejecting an entire inventory because a peer wrote a bad advisory counter would make every item a player owns disappear from every client, which is a far worse outcome than losing conflict detection for one revision.
+
 ## Conflict handling
 
 If multiple `kind:31633` events exist for the same `owner-pubkey` and `d` tag, clients SHOULD use the newest valid event by `created_at`.
 
-If two events have the same `created_at`, clients MAY choose either one or use implementation-specific tie-breaking.
+If two events have the same `created_at`, clients SHOULD retain the event with the lowest id in lexical order, which is the tie-breaking rule NIP-01 already defines for replaceable and addressable events. The previous wording ("clients MAY choose either one") is superseded: leaving the tie open invited two clients to disagree about the current inventory in exactly the case where agreement matters most.
+
+Publishers SHOULD avoid the tie entirely by ensuring each replacement's `created_at` is strictly greater than that of the event it replaces.
 
 Clients SHOULD NOT merge item tags across multiple versions of the same inventory address unless implementing a custom recovery tool.
 
@@ -439,6 +537,7 @@ A client or library SHOULD tolerate:
 
 ```text
 unknown tags
+a malformed revision tag (ignore it; do not reject the inventory)
 missing context
 missing name
 missing alt
@@ -450,14 +549,15 @@ grant references it cannot resolve
 
 ## Tag summary
 
-| Tag       | Required | Repeated | Description                                  |
-| --------- | -------- | -------- | -------------------------------------------- |
-| `d`       | yes      | no       | Inventory id                                 |
-| `a`       | no       | yes      | Item reference and quantity                  |
-| `context` | no       | yes      | Game or inventory context                    |
-| `name`    | no       | no       | Human-readable inventory name                |
-| `alt`     | no       | no       | Human-readable fallback                      |
-| `e`       | no       | yes      | Optional grant reference with marker `grant` |
+| Tag        | Required | Repeated | Description                                  |
+| ---------- | -------- | -------- | -------------------------------------------- |
+| `d`        | yes      | no       | Inventory context id (opaque, app-defined)   |
+| `revision` | no       | no       | Advisory revision counter                    |
+| `a`        | no       | yes      | Item reference and quantity                  |
+| `context`  | no       | yes      | Game or inventory context                    |
+| `name`     | no       | no       | Human-readable inventory name                |
+| `alt`      | no       | no       | Human-readable fallback                      |
+| `e`        | no       | yes      | Optional grant reference with marker `grant` |
 
 ## `a` tag format
 
@@ -550,7 +650,42 @@ export function setInventoryItemQuantity(
   itemAddress: string,
   quantity: number,
 ): GameInventory;
+
+// The safe rewrite path: turn a parsed inventory back into builder input so
+// nothing the writer does not model is lost.
+export function toBuildGameInventoryInput(
+  inventory: GameInventory,
+): BuildGameInventoryInput;
+
+// Advisory conflict detection.
+export function compareGameInventoryRevisions(
+  current: { revision?: number; event?: { id?: string; tags?: string[][] } },
+  incoming: { revision?: number; event?: { id?: string; tags?: string[][] } },
+): "unknown" | "stale" | "equivalent" | "conflict" | "ahead";
+
+// Discovery: omit `inventoryIds` to enumerate every context an owner has.
+export function buildGameInventoryFilter(options?: {
+  authors?: string[];
+  inventoryIds?: string[];
+  addresses?: string[];
+}): { kinds: [31633]; authors?: string[]; "#d"?: string[]; "#a"?: string[] };
 ```
+
+### The recommended write cycle
+
+```ts
+const base = parseGameInventory(newestEvent);
+const next = addInventoryItemQuantity(base, itemAddress, 1);
+
+const unsigned = buildGameInventoryEvent({
+  ...toBuildGameInventoryInput(next), // carries unknown tags and content through
+  revision: (next.revision ?? 0) + 1,
+});
+```
+
+Reading the base immediately before building it is what keeps the replacement
+honest; nothing in this specification makes that atomic, and the revision only
+records the assumption so a later reader can check it.
 
 ## Final decisions for kind 31633
 
@@ -563,6 +698,9 @@ Identity: 31633:<owner-pubkey>:<d>
 Required tags: d
 Item tags: ["a", "31632:<issuer-pubkey>:<item-d-tag>", "<relay-url>", "<quantity>"]
 Recommended tags: context, name, alt
+Optional advisory revision: ["revision", "<non-negative-integer>"]
+Inventory contexts per owner: many; d is opaque and application-defined
+Discovery: {"kinds":[31633],"authors":["<pubkey>"]} returns them all
 Optional grant references: ["e", "<grant-event-id>", "<relay-url>", "grant"]
 Content: empty by default, optional JSON metadata
 Purpose: declare item ownership and quantities for one inventory context

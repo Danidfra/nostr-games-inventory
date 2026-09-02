@@ -130,7 +130,14 @@ parseGameItemDefinition(event, options?): GameItemDefinition | null
 parseGameItemDefinitionResult(event, options?): ParseResult<GameItemDefinition>
 buildGameItemDefinitionEvent(input): UnsignedEventTemplate<31632>
 validateGameItemDefinition(event, options?): ItemDefinitionValidationResult
+buildGameItemDefinitionFilter(options?): GameItemDefinitionFilter
 ```
+
+`buildGameItemDefinitionFilter` resolves the definitions an inventory references
+(`{ authors: [issuer], itemIds: [...] }` — one issuer at a time, since the two
+fields intersect and two issuers may share a `d`), or discovers items by
+category (`{ topics: ["edible"] }`, which works across issuers because `t` is
+relay-indexable). Whether to trust any issuer remains application policy.
 
 #### Item images
 
@@ -212,7 +219,110 @@ parseGameInventory(event, options?): GameInventory | null
 parseGameInventoryResult(event, options?): ParseResult<GameInventory>
 buildGameInventoryEvent(input): UnsignedEventTemplate<31633>
 validateGameInventory(event, options?): InventoryValidationResult
+toBuildGameInventoryInput(inventory): BuildGameInventoryInput
+buildGameInventoryFilter(options?): GameInventoryFilter
+
+compareGameInventoryRevisions(current, incoming): GameInventoryRevisionStatus
+parseInventoryRevision(raw): number | null
+encodeInventoryRevision(value): string
+INVENTORY_REVISION_TAG // "revision"
 ```
+
+#### An inventory is a context, not "the" inventory
+
+The `d` tag is an **opaque, application-defined inventory context**. A player may
+own any number of `kind:31633` events with different `d` values, all valid at
+once — a game inventory, a backpack, a chest, a character's bag, a vault. There
+is no canonical or default inventory, and this package deliberately defines no
+`d` constant.
+
+Which contexts an application writes, reads, aggregates or allows gameplay with
+is that application's policy, never a protocol rule.
+
+#### Discovering every inventory an owner has
+
+Addressable events are indexed by author and kind, so a client that knows only a
+pubkey can enumerate all of them without knowing any `d` in advance:
+
+```ts
+buildGameInventoryFilter({ authors: [pubkey] });
+// { kinds: [31633], authors: [pubkey] }  -> newest event for EVERY d
+```
+
+No index event is needed and none exists. Pass `inventoryIds` only when you
+specifically want one known context — pinning a single `#d` on the read side
+makes a client structurally unable to see any inventory but its own.
+
+#### The safe rewrite path
+
+`kind:31633` is addressable, so publishing REPLACES the whole event. Anything
+the builder does not regenerate and you do not preserve is destroyed
+permanently — for every other client too, not just yours. Rebuilding by hand
+from a couple of fields compiles, looks correct, and silently deletes the
+contexts, grants, content and unknown tags other applications wrote.
+
+`toBuildGameInventoryInput` is the path that does not lose data:
+
+```ts
+const base = parseGameInventory(newestEvent);
+const next = addInventoryItemQuantity(base, itemAddress, 1);
+
+const unsigned = buildGameInventoryEvent({
+  ...toBuildGameInventoryInput(next),
+  revision: (next.revision ?? 0) + 1,
+});
+```
+
+Structured data comes back through the typed fields; every tag the builder does
+not manage comes back through `preserveTags`. Managed tags — `d`, `revision`,
+`context`, `name`, `alt`, every `a` tag, and `e` tags marked `grant` — are
+stripped from the preserved list and regenerated, so a rebuild never strands a
+stale duplicate. Everything else survives in its original relative order.
+
+Emitted tag order is fixed:
+
+```text
+d -> revision -> context* -> name -> a* -> e(grant)* -> alt
+  -> preserved tags -> extraTags
+```
+
+Only _valid_ data round-trips. Item references the parser rejected are not
+republished and duplicates have already been resolved, exactly as in the
+kind:31634 round-trip; both remain on `inventory.event.tags` for repair work.
+
+#### Revision semantics (31633)
+
+```ts
+compareGameInventoryRevisions(current, incoming):
+  "unknown" | "stale" | "equivalent" | "conflict" | "ahead"
+```
+
+The counter lives in a `["revision", "<n>"]` **tag**, not in `content`. This is
+the one place 31633 diverges from 31634's shape, and the kinds' own semantics
+force it: a placement's `content` is its authoritative state document, while an
+inventory's state is in its tags and its `content` is optional metadata that is
+an empty string by default. Writing a counter there would mean inventing a JSON
+object where publishers legitimately have none, and clobbering whatever a peer
+stored. The comparison semantics are unchanged from 31634.
+
+**What it gives you:** two states with valid, different revisions can be
+ordered, and two states claiming the same revision are reported as `conflict`
+unless there is hard evidence — the same event id, or byte-identical tags — that
+they are the same state.
+
+**What it does not give you:** it is not a lock and not compare-and-swap. Nostr
+has neither. It does not prevent a concurrent write, does not replace
+addressable-event resolution, cannot detect anything against a peer that omits
+the tag, and does not define a merge. Resolving a `conflict` is your decision.
+
+`created_at` is never consulted to break an equal-revision tie — timestamps are
+publisher-controlled — and tags are never sorted or normalized before comparison.
+
+A malformed `revision` is ignored with an `invalid-revision` warning in
+permissive mode and rejects only in strict mode. Refusing to parse a player's
+whole inventory because a peer wrote a bad advisory counter would make every
+item they own vanish from every UI; an ignored revision degrades to `unknown`,
+which is the designed safe fallback.
 
 ### Quantity helpers
 
@@ -222,10 +332,21 @@ getInventoryItemQuantity(inventory, itemAddress): number
 setInventoryItemQuantity(inventory, itemAddress, quantity, relay?): GameInventory
 addInventoryItemQuantity(inventory, itemAddress, amount, relay?): GameInventory
 removeInventoryItemQuantity(inventory, itemAddress, amount): GameInventory
+removeInventoryItemQuantityChecked(inventory, itemAddress, amount): GameInventoryRemovalResult
 ```
 
 All inventory helpers are **immutable**: they return a new `GameInventory` and
 never mutate the input.
+
+`removeInventoryItemQuantity` clamps its _result_ at zero, so removing 5 units of
+an item the player holds 2 of succeeds silently. That is right for "take up to
+N" and is unchanged. For a spend, where an over-spend must not look like a
+success, use `removeInventoryItemQuantityChecked`, which returns
+`{ ok: false, reason: "insufficient-quantity", available, requested }` instead.
+
+The division is the one the package uses throughout: a caller bug (a malformed
+address, a non-integer amount) throws; a data condition (not enough of the item)
+is a structured result.
 
 ### Kind 31634 — Game Item Placement
 
@@ -720,30 +841,52 @@ These were resolved explicitly rather than silently:
    marker — and reports the deviation as a warning rather than an error, so
    authoring tools can flag it without any client rejecting the item.
 
+### kind:31633 decisions (this release)
+
+8. **`revision` is a tag, not a content field.** kind:31634 carries its counter
+   in `content` because content is its authoritative state. An inventory's state
+   is its tags and its `content` is optional metadata that is an empty string by
+   default, so a counter there would mean inventing a JSON object publishers do
+   not have and clobbering whatever a peer stored. The comparison semantics are
+   unchanged from 31634.
+9. **A malformed `revision` warns rather than rejects.** kind:31634 rejects an
+   invalid counter. For an inventory that would make every item a player owns
+   vanish from every client because a peer wrote a bad advisory value, so
+   permissive mode ignores it with an `invalid-revision` warning and degrades to
+   `unknown`; strict mode still rejects.
+10. **Equal-revision evidence is the tags, not the content.** 31634 compares the
+    raw `content` string because that is its state. 31633 compares the tag list
+    element-by-element, exactly as received, for the same reason. Nothing is
+    sorted or normalized, so a differing tag order is honestly a `conflict`.
+11. **The `created_at` tie-break follows NIP-01.** The spec previously said
+    clients "MAY choose either one"; it now says lowest event id, matching
+    NIP-01, because leaving it open invited two clients to disagree about the
+    current inventory in the one case where agreement matters most.
+
 ### kind:31634 decisions
 
-8. **`content` is required and authoritative.** Unlike the other two kinds, a
-   placement carries its state in `content`, so an empty/non-object `content` is
-   rejected instead of tolerated. There is deliberately no `requireJsonContent`
-   option for 31634.
-9. **Unknown discriminators are preserved, not rejected.** A malformed _known_
-   target rejects the event, but an unknown `target.type`, an unknown
-   `reference.space` and an unknown `rotation.type` are kept verbatim. Rejecting
-   them would make this version reject documents written against a newer one.
-10. **Absent vs. wrong `placements`.** An absent `placements` is read as an empty
+12. **`content` is required and authoritative.** Unlike the other two kinds, a
+    placement carries its state in `content`, so an empty/non-object `content` is
+    rejected instead of tolerated. There is deliberately no `requireJsonContent`
+    option for 31634.
+13. **Unknown discriminators are preserved, not rejected.** A malformed _known_
+    target rejects the event, but an unknown `target.type`, an unknown
+    `reference.space` and an unknown `rotation.type` are kept verbatim. Rejecting
+    them would make this version reject documents written against a newer one.
+14. **Absent vs. wrong `placements`.** An absent `placements` is read as an empty
     list with a warning; a present non-array `placements` rejects the event. Both
     spellings of "nothing is placed" are understood, but a structurally wrong
     value is never guessed at.
-11. **`version` and `revision` reject when invalid.** They are advisory, but a
+15. **`version` and `revision` reject when invalid.** They are advisory, but a
     present-and-invalid counter (including a numeric _string_) is a content
     error, not something to silently coerce or ignore.
-12. **Tag/content mismatch is a warning, never a rejection** — in strict mode
+16. **Tag/content mismatch is a warning, never a rejection** — in strict mode
     too. The tags are a derived index; the fix is to republish repaired tags.
-13. **`z` is required only under a recognized 3D reference.** Otherwise
+17. **`z` is required only under a recognized 3D reference.** Otherwise
     `position.z` is optional, so the same entry shape serves 2D and 3D.
-14. **Slot reads are explicit.** No `getEquippedPlacementBySlot`; the caller asks
+18. **Slot reads are explicit.** No `getEquippedPlacementBySlot`; the caller asks
     for first, last, or all. Slot _writes_ are deterministic last-wins.
-15. **Mutations do not refresh source-event fields.** `content`, `contentJson`,
+19. **Mutations do not refresh source-event fields.** `content`, `contentJson`,
     `itemTags`, `targetTags` and `event` still describe the event the placement
     was parsed from; rebuilding regenerates everything from `placements`.
 
@@ -759,14 +902,15 @@ src/
     tags.ts                      # getDTag, getTagValue(s)
     json.ts                      # content JSON parse/serialize
     result.ts                    # ParseMode / ParseResult / warnings
-    strings.ts                   # isBlank
+    strings.ts                   # isBlank, uniqueNonBlank
     numbers.ts                   # finite / non-negative-integer checks (internal)
     objects.ts                   # isPlainObject, deep JSON clone (internal)
   kinds/
     game-item-definition/        # kind 31632
-      { types, images, address, validate, parse, build, index }
+      { types, images, address, filter, validate, parse, build, index }
     game-inventory/              # kind 31633
-      { types, address, quantity, validate, parse, build, helpers, index }
+      { types, address, quantity, revision, filter, validate, parse, build,
+        helpers, index }
     game-item-placement/         # kind 31634
       { types, guards, address, tags, content, validate, parse, build,
         helpers, revision, index }

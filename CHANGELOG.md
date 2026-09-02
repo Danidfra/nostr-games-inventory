@@ -6,7 +6,66 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the major version is `0`, minor bumps may add public API but aim to stay
 backward compatible.
 
-## 0.3.0 (unreleased)
+## Unreleased
+
+Strengthens **kind:31633 Game Inventory** so that a writer can replace an
+inventory without destroying data it does not own, and so that a reader can
+detect a lost update. Both capabilities already existed for kind:31634; this
+brings the kind that actually holds a player's property up to the same level.
+
+Fully additive: every 0.3.0 API behaves exactly as before, no existing type
+changed, and no existing behaviour was altered.
+
+### Added
+
+- **Lossless round-trip for kind:31633** — `toBuildGameInventoryInput(inventory)`
+  turns a parsed inventory back into builder input, and `preserveTags` on
+  `buildGameInventoryEvent` carries unrelated tags through a rewrite. Stale
+  managed tags (`d`, `revision`, `context`, `name`, `alt`, every `a` tag, and
+  `e` tags marked `grant`) are stripped and regenerated, so a rebuild never
+  strands a duplicate; everything else survives in its original relative order.
+  This is the kind:31634 `toBuildGameItemPlacementInput` / `preserveTags`
+  pattern, applied to inventories.
+- **Advisory revision for kind:31633** — an optional `["revision", "<n>"]` tag,
+  exposed as `GameInventory.revision`, emitted from `BuildGameInventoryInput.revision`,
+  and preserved by the round-trip. Helpers: `compareGameInventoryRevisions`
+  (`unknown | stale | equivalent | conflict | ahead`), `parseInventoryRevision`,
+  `encodeInventoryRevision`, `INVENTORY_REVISION_TAG`, plus the
+  `GameInventoryRevisionStatus` and `GameInventoryRevisionCandidate` types.
+  `created_at` is never used to break an equal-revision tie and tags are never
+  normalized before comparison.
+- **`removeInventoryItemQuantityChecked`** — a removal that reports
+  `{ ok: false, reason: "insufficient-quantity", available, requested }` instead
+  of clamping at zero, for spend paths where an over-spend must not look like a
+  success. The clamping `removeInventoryItemQuantity` is unchanged.
+- **Filter builders** — `buildGameInventoryFilter` and
+  `buildGameItemDefinitionFilter`, matching the existing
+  `buildGameItemPlacementFilter`. Passing only `authors` to the inventory filter
+  enumerates every inventory context an owner has, with no `d` known in advance.
+- **`invalid-revision`** parse warning code on `ParseWarningCode`.
+
+### Changed
+
+- `buildGameInventoryEvent` now rejects a `revision` tag supplied through
+  `extraTags`, the same way it already rejects every other builder-managed tag.
+  Previously `revision` had no meaning for this kind, so nothing could have been
+  relying on it passing through.
+- Internal only: `uniqueNonBlank` moved from `game-item-placement/tags.ts` to
+  `common/strings.ts` so the three filter builders share one implementation. No
+  public behaviour changed.
+
+### Documentation
+
+- `docs/31633-game-inventory.md` — `d` documented as an opaque,
+  application-defined inventory context with many valid per owner and no
+  canonical value; owner-wide discovery by author documented; a preservation
+  requirement for writers; the optional revision tag with an explicit list of
+  what it does and does not guarantee; and the `created_at` tie-break aligned
+  with NIP-01's lowest-id rule, superseding the previous "MAY choose either".
+- README — the safe rewrite path, revision semantics, discovery, and four new
+  recorded design decisions for kind:31633.
+
+## 0.3.0
 
 Adds **kind:31634 Game Item Placement**. Backward compatible: every 31632,
 image and 31633 API behaves exactly as before, and no existing type changed.
