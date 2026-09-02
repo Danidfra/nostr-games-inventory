@@ -16,6 +16,7 @@ import {
 } from "../game-item-definition/address.js";
 import { parseAddressableEventAddress } from "../../common/address.js";
 import { parseInventoryQuantity } from "./quantity.js";
+import { INVENTORY_REVISION_TAG, parseInventoryRevision } from "./revision.js";
 import { MAX_QUANTITY } from "./quantity.internal.js";
 import { validateGameInventory } from "./validate.js";
 import { GRANT_MARKER, buildGameInventoryAddress } from "./address.js";
@@ -70,6 +71,14 @@ export interface ParseGameInventoryOptions {
  * malformed, reference a non-31632 kind, or carry an invalid quantity are
  * ignored and reported as warnings. Malformed grant tags are ignored with an
  * `invalid-grant-tag` warning.
+ *
+ * A malformed `revision` tag is ignored with an `invalid-revision` warning in
+ * permissive mode and rejects the event in strict mode. It is deliberately NOT
+ * a MUST-reject condition: `revision` is an advisory counter, and refusing to
+ * parse a player's entire inventory because a peer wrote a bad counter would
+ * make every item in it disappear from every UI. An ignored revision degrades
+ * to `undefined`, which `compareGameInventoryRevisions` reports as `unknown` —
+ * the designed safe fallback.
  */
 export function parseGameInventoryResult(
   event: NostrEvent,
@@ -89,6 +98,27 @@ export function parseGameInventoryResult(
   }
 
   const id = getTagValue(event.tags, "d") as string;
+
+  // Advisory revision counter. Absent is normal; malformed is a warning in
+  // permissive mode and a rejection in strict mode.
+  let revision: number | undefined;
+  const revisionRaw = getTagValue(event.tags, INVENTORY_REVISION_TAG);
+  if (revisionRaw !== undefined) {
+    const parsedRevision = parseInventoryRevision(revisionRaw);
+    if (parsedRevision === null) {
+      const message = `Invalid \`${INVENTORY_REVISION_TAG}\` tag value: ${revisionRaw}`;
+      if (mode === "strict") {
+        return fail(message, warnings);
+      }
+      warnings.push({
+        code: "invalid-revision",
+        message: `${message}; ignored`,
+        tag: [INVENTORY_REVISION_TAG, revisionRaw],
+      });
+    } else {
+      revision = parsedRevision;
+    }
+  }
 
   // Collect valid item references in tag order.
   const collected: GameInventoryItem[] = [];
@@ -186,6 +216,9 @@ export function parseGameInventoryResult(
   const alt = getTagValue(event.tags, "alt");
   if (alt !== undefined) {
     inventory.alt = alt;
+  }
+  if (revision !== undefined) {
+    inventory.revision = revision;
   }
   if (contentJson !== undefined) {
     inventory.contentJson = contentJson;

@@ -4,6 +4,7 @@ import {
   type KindGameInventory,
 } from "../../common/constants.js";
 import { serializeContent } from "../../common/json.js";
+import { isNonNegativeSafeInteger } from "../../common/numbers.js";
 import { isBlank } from "../../common/strings.js";
 import {
   parseGameItemAddress,
@@ -15,10 +16,12 @@ import {
 } from "./quantity.internal.js";
 import { encodeInventoryQuantity } from "./quantity.js";
 import { GRANT_MARKER } from "./address.js";
+import { INVENTORY_REVISION_TAG, encodeInventoryRevision } from "./revision.js";
 import type {
   BuildGameInventoryInput,
   BuildGameInventoryItemInput,
   DuplicateStrategy,
+  GameInventory,
 } from "./types.js";
 
 /**
@@ -29,7 +32,13 @@ import type {
  * check in {@link assertExtraTagAllowed}: in kind:31633 *every* `a` tag is the
  * inventory item representation, so all `a` tags are rejected.
  */
-const MANAGED_TAG_NAMES = new Set<string>(["d", "context", "name", "alt"]);
+const MANAGED_TAG_NAMES = new Set<string>([
+  "d",
+  INVENTORY_REVISION_TAG,
+  "context",
+  "name",
+  "alt",
+]);
 
 /**
  * Build an unsigned kind:31633 event template.
@@ -45,8 +54,19 @@ const MANAGED_TAG_NAMES = new Set<string>(["d", "context", "name", "alt"]);
  * - rejects grants with an empty/whitespace-only event id;
  * - emits tags in a stable, deterministic order;
  * - never creates `id` or `sig`;
+ * - validates `revision` (a non-negative safe integer) and emits it as a
+ *   `["revision", "<n>"]` tag when supplied;
+ * - carries `preserveTags` over with stale managed tags stripped, so a rewrite
+ *   never destroys another client's tags and never strands a duplicate;
  * - rejects `extraTags` that conflict with builder-managed tags and appends the
- *   rest verbatim after the managed tags.
+ *   rest verbatim after the preserved tags.
+ *
+ * Emitted tag order is fixed and deterministic:
+ *
+ * ```text
+ * d -> revision -> context* -> name -> a* -> e(grant)* -> alt
+ *   -> preserved tags -> extraTags
+ * ```
  *
  * Non-empty display values are never trimmed or otherwise normalized.
  *
@@ -63,10 +83,26 @@ export function buildGameInventoryEvent(
     );
   }
 
+  if (
+    input.revision !== undefined &&
+    !isNonNegativeSafeInteger(input.revision)
+  ) {
+    throw new Error(
+      `buildGameInventoryEvent: \`revision\` must be a non-negative safe integer: ${String(input.revision)}`,
+    );
+  }
+
   const strategy: DuplicateStrategy = input.duplicateStrategy ?? "last";
   const items = normalizeItems(input.items ?? [], strategy);
 
   const tags: string[][] = [["d", input.id]];
+
+  if (input.revision !== undefined) {
+    tags.push([
+      INVENTORY_REVISION_TAG,
+      encodeInventoryRevision(input.revision),
+    ]);
+  }
 
   for (const context of input.contexts ?? []) {
     // Repeatable display metadata: omit when blank, never normalize otherwise.
@@ -98,6 +134,13 @@ export function buildGameInventoryEvent(
 
   if (input.alt !== undefined && !isBlank(input.alt)) {
     tags.push(["alt", input.alt]);
+  }
+
+  for (const tag of input.preserveTags ?? []) {
+    if (isManagedInventoryTag(tag)) {
+      continue;
+    }
+    tags.push([...tag]);
   }
 
   for (const tag of input.extraTags ?? []) {
@@ -200,4 +243,94 @@ function assertExtraTagAllowed(tag: string[]): void {
       `buildGameInventoryEvent: \`extraTags\` may not contain the builder-managed tag \`${name}\``,
     );
   }
+}
+
+/**
+ * `true` when a preserved tag is a stale copy of something this builder
+ * regenerates from the structured input.
+ *
+ * Every `a` tag is managed: in kind:31633 an `a` tag *is* the item
+ * representation, and items are rebuilt from `items`. An `e` tag is only
+ * managed when it carries the `grant` marker, so unrelated and future `e`
+ * relationships written by other clients survive a rewrite.
+ */
+function isManagedInventoryTag(tag: string[]): boolean {
+  const name = tag[0];
+  if (name === undefined) {
+    return false;
+  }
+  if (MANAGED_TAG_NAMES.has(name)) {
+    return true;
+  }
+  if (name === "a") {
+    return true;
+  }
+  if (name === "e" && tag[3] === GRANT_MARKER) {
+    return true;
+  }
+  return false;
+}
+
+/**
+ * Turn a parsed inventory back into builder input without losing data.
+ *
+ * This is the safe rewrite path for kind:31633, and the one every writer should
+ * use. Because the kind is addressable, publishing REPLACES the whole event:
+ * anything the builder does not regenerate and the caller does not preserve is
+ * destroyed permanently, for every other client too. Rebuilding by hand from a
+ * few fields — `{ id, items }` — compiles, looks correct, and silently deletes
+ * the contexts, grant references, content and unknown tags that other
+ * applications wrote.
+ *
+ * Everything structured comes back through the typed fields, and every tag this
+ * builder does not manage comes back through `preserveTags`.
+ *
+ * Spread the result to override fields, for example to add an item and bump the
+ * revision:
+ *
+ * ```ts
+ * const next = addInventoryItemQuantity(inventory, itemAddress, 1);
+ * const unsigned = buildGameInventoryEvent({
+ *   ...toBuildGameInventoryInput(next),
+ *   revision: (next.revision ?? 0) + 1,
+ * });
+ * ```
+ *
+ * Note that only *valid* data round-trips. Item references the parser rejected
+ * — a malformed address, a non-31632 coordinate, an invalid quantity — are not
+ * republished, and duplicate references have already been resolved by the
+ * parser's duplicate strategy. Both remain visible on `inventory.event.tags`
+ * for repair workflows. This matches the kind:31634 round-trip exactly.
+ */
+export function toBuildGameInventoryInput(
+  inventory: GameInventory,
+): BuildGameInventoryInput {
+  const result: BuildGameInventoryInput = {
+    id: inventory.id,
+    items: inventory.items.map((item) => ({
+      address: item.address,
+      relay: item.relay,
+      quantity: item.quantity,
+    })),
+    contexts: [...inventory.contexts],
+    grants: inventory.grants.map((grant) => ({
+      eventId: grant.eventId,
+      relay: grant.relay,
+    })),
+    // The raw content string passes through `serializeContent` verbatim.
+    content: inventory.content,
+    preserveTags: inventory.event.tags.map((tag) => [...tag]),
+  };
+
+  if (inventory.name !== undefined) {
+    result.name = inventory.name;
+  }
+  if (inventory.alt !== undefined) {
+    result.alt = inventory.alt;
+  }
+  if (inventory.revision !== undefined) {
+    result.revision = inventory.revision;
+  }
+
+  return result;
 }

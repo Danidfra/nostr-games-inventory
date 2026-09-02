@@ -44,6 +44,15 @@ export interface GameInventory {
   name?: string;
   /** Optional `alt` tag. */
   alt?: string;
+  /**
+   * The advisory `revision` counter, when the event carried a valid one.
+   *
+   * `undefined` when the tag is absent, or (in permissive mode) when it was
+   * present but malformed — in which case an `invalid-revision` warning is
+   * reported. See {@link compareGameInventoryRevisions} for what a revision
+   * does and does not guarantee.
+   */
+  revision?: number;
 
   /** Valid item references, in tag order (after duplicate resolution). */
   items: GameInventoryItem[];
@@ -102,6 +111,30 @@ export interface BuildGameInventoryInput {
   /** Optional content; string or JSON-serializable value. Defaults to `""`. */
   content?: unknown;
   /**
+   * Advisory revision counter, emitted as a `["revision", "<n>"]` tag.
+   *
+   * Must be a non-negative safe integer; anything else throws. Omit it to emit
+   * no revision tag at all. A writer that wants conflict detection reads the
+   * base inventory and publishes `(base.revision ?? 0) + 1`.
+   */
+  revision?: number;
+  /**
+   * Tags from the event being replaced (typically `inventory.event.tags`),
+   * carried over with stale builder-managed tags stripped.
+   *
+   * This is the mechanism that stops a rewrite from destroying data belonging
+   * to another client. kind:31633 is a replaceable event: a publish replaces
+   * the whole tag list, so any tag this builder does not regenerate and the
+   * caller does not preserve is gone permanently. Prefer
+   * {@link toBuildGameInventoryInput}, which populates this for you.
+   *
+   * Stripped as stale (they are regenerated from the structured fields):
+   * `d`, `revision`, `context`, `name`, `alt`, every `a` tag, and `e` tags
+   * carrying the `grant` marker. Everything else survives in its original
+   * relative order.
+   */
+  preserveTags?: string[][];
+  /**
    * How to handle duplicate item addresses in the input. Defaults to `last`
    * (the spec's recommended default). `strict` throws on duplicates. `sum`
    * throws if the summed quantity exceeds Number.MAX_SAFE_INTEGER.
@@ -111,7 +144,8 @@ export interface BuildGameInventoryInput {
    * Extra tags appended verbatim after managed tags.
    *
    * Tags that conflict with builder-managed tags are REJECTED (the builder
-   * throws), not silently duplicated. Rejected: `d`, `context`, `name`, `alt`;
+   * throws), not silently duplicated. Rejected: `d`, `revision`, `context`,
+   * `name`, `alt`;
    * every `a` tag (all `a` tags represent inventory items in kind:31633 — pass
    * items via `items`); and `e` tags carrying the `grant` marker (pass grants
    * via `grants`). Unrelated forward-compatible tags, including non-grant `e`

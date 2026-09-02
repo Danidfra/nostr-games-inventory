@@ -40,6 +40,7 @@ export type ParseWarningCode =
   | "duplicate-item"
   | "invalid-grant-tag"
   | "empty-required-value"
+  | "invalid-revision"
   // kind:31634 Game Item Placement
   | "invalid-placement-entry"
   | "duplicate-placement-id"
