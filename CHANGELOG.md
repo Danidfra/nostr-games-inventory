@@ -6,7 +6,7 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the major version is `0`, minor bumps may add public API but aim to stay
 backward compatible.
 
-## Unreleased
+## 0.4.0
 
 Strengthens **kind:31633 Game Inventory** so that a writer can replace an
 inventory without destroying data it does not own, and so that a reader can
@@ -42,6 +42,8 @@ changed, and no existing behaviour was altered.
   `buildGameItemDefinitionFilter`, matching the existing
   `buildGameItemPlacementFilter`. Passing only `authors` to the inventory filter
   enumerates every inventory context an owner has, with no `d` known in advance.
+  These are published for the first time in 0.4.0; 0.3.0 predates them and
+  exposes only `buildGameItemPlacementFilter`.
 - **`invalid-revision`** parse warning code on `ParseWarningCode`.
 
 ### Changed
