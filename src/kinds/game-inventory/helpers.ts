@@ -149,3 +149,75 @@ export function getInventoryItems(
 ): GameInventoryItem[] {
   return inventory.items.map((item) => ({ ...item }));
 }
+
+/**
+ * The outcome of a checked removal.
+ *
+ * Insufficient quantity is a *data* condition, not a programming error, so it
+ * is reported as a structured result rather than thrown — the same division the
+ * rest of the package uses (a malformed address or a non-integer amount still
+ * throws, because those are caller bugs).
+ */
+export type GameInventoryRemovalResult =
+  | {
+      ok: true;
+      /** The new inventory. The input is never mutated. */
+      inventory: GameInventory;
+      /** Units actually removed. Equal to the requested amount. */
+      removed: number;
+      /** Units left after the removal. `0` means the item was removed. */
+      remaining: number;
+    }
+  | {
+      ok: false;
+      reason: "insufficient-quantity";
+      /** Units the inventory actually held. */
+      available: number;
+      /** Units the caller asked to remove. */
+      requested: number;
+    };
+
+/**
+ * Remove `amount` of an item, reporting insufficient quantity instead of
+ * silently clamping.
+ *
+ * {@link removeInventoryItemQuantity} clamps its *result* at zero, so removing
+ * 5 units of an item the player holds 2 of succeeds and reports nothing. That
+ * is the correct behaviour for a caller that means "take up to N", and it is
+ * kept unchanged. It is the wrong behaviour for a spend: an over-spend then
+ * looks identical to a legitimate one.
+ *
+ * This variant refuses instead, and tells the caller what was actually
+ * available.
+ *
+ * - `itemAddress` must be a valid kind:31632 coordinate (throws otherwise).
+ * - `amount` must be a non-negative safe integer (throws otherwise). Removing
+ *   `0` always succeeds and returns a fresh inventory object.
+ * - The input inventory is never mutated, and on `ok: false` nothing is built.
+ */
+export function removeInventoryItemQuantityChecked(
+  inventory: GameInventory,
+  itemAddress: string,
+  amount: number,
+): GameInventoryRemovalResult {
+  assertItemAddress(itemAddress);
+  assertNonNegativeInteger(amount, "amount");
+
+  const available = getInventoryItemQuantity(inventory, itemAddress);
+  if (amount > available) {
+    return {
+      ok: false,
+      reason: "insufficient-quantity",
+      available,
+      requested: amount,
+    };
+  }
+
+  const remaining = available - amount;
+  return {
+    ok: true,
+    inventory: setInventoryItemQuantity(inventory, itemAddress, remaining),
+    removed: amount,
+    remaining,
+  };
+}

@@ -1,5 +1,5 @@
 import type { NostrEvent } from "../../nostr/event.js";
-import { isBlank } from "../../common/strings.js";
+import { isBlank, uniqueNonBlank } from "../../common/strings.js";
 import {
   KIND_GAME_ITEM_PLACEMENT,
   type KindGameItemPlacement,
@@ -195,20 +195,4 @@ export function filterEventsByPlacementItemAddress(
   return events.filter((event) =>
     event.tags.some((tag) => isPlacementItemTag(tag) && tag[1] === itemAddress),
   );
-}
-
-function uniqueNonBlank(values: string[] | undefined): string[] {
-  if (values === undefined) {
-    return [];
-  }
-  const seen = new Set<string>();
-  const result: string[] = [];
-  for (const value of values) {
-    if (isBlank(value) || seen.has(value)) {
-      continue;
-    }
-    seen.add(value);
-    result.push(value);
-  }
-  return result;
 }
