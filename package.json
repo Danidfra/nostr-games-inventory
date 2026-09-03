@@ -1,6 +1,6 @@
 {
   "name": "@nostr-games/inventory",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Framework-independent TypeScript library for Nostr game item definitions (kind:31632), game inventories (kind:31633), game item placements (kind:31634), and append-only inventory spends and fold manifests (kind:1416, kind:1417).",
   "license": "MIT",
   "type": "module",
