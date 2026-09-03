@@ -1,11 +1,15 @@
 # @nostr-games/inventory
 
-Framework-independent TypeScript library implementing three Nostr event kinds
+Framework-independent TypeScript library implementing five Nostr event kinds
 for games:
 
 - **`kind:31632`** — Game Item Definition — _what an item is_
 - **`kind:31633`** — Game Inventory — _which items are held, and how many_
 - **`kind:31634`** — Game Item Placement — _where items are equipped or placed_
+- **`kind:1416`** — Game Inventory Spend — _an append-only, owner-signed debit
+  against one inventory_
+- **`kind:1417`** — Game Inventory Fold Manifest — _which spends a snapshot has
+  incorporated_
 
 It provides constants, types, parsers, builders, validators and helpers for
 these kinds. It is pure, has no import-time side effects, no framework or
@@ -17,12 +21,26 @@ application dependencies, and works in both browser and Node environments.
 
 ## Responsibility boundaries
 
-The three kinds answer three different questions and must not be conflated:
+The addressable kinds answer three different questions and must not be
+conflated:
 
 ```text
 definition != ownership != placement
 31632      != 31633    != 31634
 ```
+
+The two regular kinds are the append-only side of ownership:
+
+```text
+snapshot (replaced)  != spend (only ever added)  != fold (only ever added)
+31633                != 1416                     != 1417
+```
+
+A **spend** debits one item from one inventory and is signed by the inventory
+owner. A **fold manifest** records exactly which spends a snapshot has
+incorporated. Neither replaces a snapshot; only the inventory's designated
+writer does that, and it folds outstanding spends when it does. See
+[Kind 1416 / 1417](#kind-1416--1417--spends-and-fold-manifests).
 
 A **placement** event does not define an item, does not prove ownership, does
 not grant, spend or consume anything, does not claim a reward, does not
@@ -73,6 +91,8 @@ See [CHANGELOG.md](./CHANGELOG.md) for release notes.
 KIND_GAME_ITEM_DEFINITION; // 31632
 KIND_GAME_INVENTORY; // 31633
 KIND_GAME_ITEM_PLACEMENT; // 31634
+KIND_GAME_INVENTORY_SPEND; // 1416
+KIND_GAME_INVENTORY_FOLD; // 1417
 ```
 
 ### Nostr types
@@ -226,6 +246,7 @@ compareGameInventoryRevisions(current, incoming): GameInventoryRevisionStatus
 parseInventoryRevision(raw): number | null
 encodeInventoryRevision(value): string
 INVENTORY_REVISION_TAG // "revision"
+INVENTORY_FOLD_MARKER // "fold"  — the e-tag marker of the optional fold reference
 ```
 
 #### An inventory is a context, not "the" inventory
@@ -275,14 +296,16 @@ const unsigned = buildGameInventoryEvent({
 
 Structured data comes back through the typed fields; every tag the builder does
 not manage comes back through `preserveTags`. Managed tags — `d`, `revision`,
-`context`, `name`, `alt`, every `a` tag, and `e` tags marked `grant` — are
-stripped from the preserved list and regenerated, so a rebuild never strands a
-stale duplicate. Everything else survives in its original relative order.
+`context`, `name`, `alt`, every `a` tag, and `e` tags marked `grant` or
+`fold` — are stripped from the preserved list and regenerated, so a rebuild
+never strands a stale duplicate. Everything else survives in its original
+relative order. The fold reference (`GameInventory.fold`) round-trips too,
+which is what stops a rewrite that folds nothing new from un-folding the chain.
 
 Emitted tag order is fixed:
 
 ```text
-d -> revision -> context* -> name -> a* -> e(grant)* -> alt
+d -> revision -> context* -> name -> a* -> e(grant)* -> e(fold) -> alt
   -> preserved tags -> extraTags
 ```
 
@@ -323,6 +346,160 @@ permissive mode and rejects only in strict mode. Refusing to parse a player's
 whole inventory because a peer wrote a bad advisory counter would make every
 item they own vanish from every UI; an ignored revision degrades to `unknown`,
 which is the designed safe fallback.
+
+### Kind 1416 / 1417 — spends and fold manifests
+
+```ts
+// kind:1416 Game Inventory Spend
+parseGameInventorySpend(event, options?): GameInventorySpend | null
+parseGameInventorySpendResult(event, options?): ParseResult<GameInventorySpend>
+validateGameInventorySpend(event, options?): SpendValidationResult
+buildGameInventorySpendEvent(input): UnsignedEventTemplate<1416>
+buildGameInventorySpendFilter(options?): GameInventorySpendFilter
+compareGameInventorySpendOrder(a, b): number          // (created_at asc, id asc)
+sortGameInventorySpends(spends): T[]
+SPEND_ITEM_MARKER // "item"   SPEND_QUANTITY_TAG // "quantity"   INVENTORY_MARKER // "inventory"
+
+// Derivation (pure)
+deriveGameInventoryState({ inventory, spends, foldedSpendIds?, voidedSpendIds? }, options?)
+  : GameInventoryDerivedState
+
+// kind:1417 Game Inventory Fold Manifest
+parseGameInventoryFold(event, options?): GameInventoryFold | null
+parseGameInventoryFoldResult(event, options?): ParseResult<GameInventoryFold>
+validateGameInventoryFold(event, options?): FoldValidationResult
+buildGameInventoryFoldEvent(input): UnsignedEventTemplate<1417>
+toBuildGameInventoryFoldInput(state): BuildGameInventoryFoldInput | null
+buildGameInventoryFoldFilter(options?): GameInventoryFoldFilter
+FOLD_PREVIOUS_MARKER // "previous"   FOLD_SPEND_MARKER // "spend"   FOLD_VOID_MARKER // "void"
+
+// Chain resolution and the reader's entry point (pure)
+resolveGameInventoryFoldChain({ inventoryAddress, headFoldId?, folds, spends? }, options?)
+  : GameInventoryFoldResolution
+resolveGameInventoryState({ inventory, folds, spends }, options?)
+  : { status: "resolved"; chain; state } | { status: "unresolved"; chain }
+```
+
+The protocol is specified in
+[`docs/1416-1417-game-inventory-spend.md`](./docs/1416-1417-game-inventory-spend.md).
+The short version:
+
+#### Why spends exist
+
+`kind:31633` is addressable: a publish replaces the whole event. If the farm
+game and the island game both replace `31633:<player>:farm:main`, the last
+write wins and the other is destroyed. Spends let any application **debit** an
+inventory without replacing it:
+
+```text
+island game  ->  player signs kind:1416 "spend 1 strawberry from 31633:<player>:farm:main"
+readers      ->  effective = snapshot − applicable spends not yet folded
+farm game    ->  next time it replaces the snapshot anyway, it folds the outstanding
+                 spends into the new quantities, publishes a kind:1417 listing
+                 exactly which spend ids it incorporated, and references it
+```
+
+#### Spend shape and authority
+
+```json
+["a", "31633:<owner>:<inventory-d>", "<relay>", "inventory"]
+["a", "31632:<issuer>:<item-d>", "<relay>", "item"]
+["quantity", "<positive-integer>"]
+```
+
+Exactly one of each. Full addresses always: an inventory or an item is never
+identified by `d` alone. **`event.pubkey` must equal the owner in the inventory
+address**, or the event is not a spend — it is rejected by the parser and can
+never affect a balance, whatever `client` tag it carries. Optional `purpose`,
+`client`, `nonce` and `alt` tags are preserved and never consulted for
+accounting. One item per spend; the event id is the spend's identity, so a
+retry republishes the same signed event rather than signing a new one.
+
+#### Deterministic derivation
+
+Pending spends are walked in `(created_at asc, id asc)` order. A spend whose
+quantity is at most the current balance of its item is **applied**; anything
+else is **rejected** in full — never partial, never clamped, never deferred.
+Relay duplicates are removed by id first. Every reader with the same snapshot,
+chain and spend set derives the same result, whatever order relays delivered
+the events in.
+
+`deriveGameInventoryState` returns the effective inventory as a regular
+`GameInventory` — so `addInventoryItemQuantity`, `toBuildGameInventoryInput`
+and friends work on it unchanged — plus every candidate's status: `applied`,
+`rejected`, `folded`, `voided`, `ignored` (valid, other inventory) or `invalid`.
+
+#### Fold manifests and the chain
+
+```json
+["a", "31633:<owner>:<inventory-d>", "<relay>", "inventory"]
+["e", "<previous-manifest-id>", "<relay>", "previous"]
+["e", "<spend-id>", "<relay>", "spend"]
+["e", "<spend-id>", "<relay>", "void"]
+```
+
+`spend` references are applied spends now inside the snapshot's numbers;
+`void` references are rejected spends the owner has settled as permanently not
+applicable (so an overdraw cannot resurface against a later, larger balance).
+A manifest that lists the same id twice, or lists nothing, is rejected. The
+snapshot references its manifest with `["e", "<id>", "<relay>", "fold"]`, and:
+
+```text
+effective = snapshot − applicable spends not reachable through the fold chain
+```
+
+`resolveGameInventoryFoldChain` walks the chain head-first, stops on a cycle,
+and returns `unresolved` when a manifest is missing, invalid, scoped to another
+inventory, or (when spend events are supplied) references an invalid or
+foreign spend. `resolveGameInventoryState` combines chain resolution and
+derivation and **produces no state when the chain is unresolved**: the library
+does not guess whether an unknown manifest folded a spend, in either
+direction.
+
+#### No timestamp watermark
+
+A spend's `created_at` decides its **order**, never whether it is **settled**.
+A spend older than the snapshot that has not been folded is still pending,
+because relays deliver late. Explicit ids are the only settlement mechanism,
+and `buildGameInventorySpendFilter` deliberately has no `since`.
+
+#### Publication order
+
+Publish the manifest, wait for a relay to accept it, then publish the snapshot
+that references it. An orphan manifest is harmless (it settles nothing); a
+snapshot pointing at a manifest nobody can fetch is not (readers cannot prove
+what it incorporated).
+
+#### The owner's cycle
+
+```ts
+const r = resolveGameInventoryState({ inventory: base, folds, spends });
+if (r.status !== "resolved") {
+  /* fetch r.chain.problems' manifests, retry */
+}
+const next = addInventoryItemQuantity(r.state.inventory, harvested, 2);
+
+const foldInput = toBuildGameInventoryFoldInput(r.state); // null if nothing to settle
+const manifest = foldInput && buildGameInventoryFoldEvent(foldInput);
+// sign + publish manifest, wait for acceptance …
+
+const unsigned = buildGameInventoryEvent({
+  ...toBuildGameInventoryInput(next), // carries the previous fold reference
+  ...(manifest ? { fold: { eventId: manifestId } } : {}),
+  revision: (next.revision ?? 0) + 1,
+});
+```
+
+#### What it does not solve
+
+The spend model removes the cross-application lost update. It is not
+compare-and-swap for `kind:31633`: two instances of the **owner** that both
+replace from the same base still race, exactly as before, and `revision` is
+still the only (advisory) way to notice. No reader double-debits in that case;
+the losing instance's own mutation is what is lost. `revision` is unrelated to
+folds and is never a spend checkpoint. Grants, transfers, reservations,
+conversions and crafting are out of scope, and nothing here decides whether an
+issuer or item is trusted.
 
 ### Quantity helpers
 
@@ -863,6 +1040,46 @@ These were resolved explicitly rather than silently:
     NIP-01, because leaving it open invited two clients to disagree about the
     current inventory in the one case where agreement matters most.
 
+### kind:1416 / kind:1417 decisions
+
+20. **Spend, not "operation".** `kind:1416` is a debit only. A generic
+    operation kind with a `type` field would make every reader understand every
+    future type before trusting any balance; grants and the rest will be their
+    own kinds.
+21. **One item per spend.** One event id is one debit identity, applicability
+    is one comparison, ordering is total, and partial application cannot arise.
+22. **Author = inventory owner is structural.** A spend by anyone else is not a
+    spend; it is rejected at parse time, so no derivation path can ever see it.
+    A `client` tag is informational and never an authorisation.
+23. **`(created_at, id)` is the order, and nothing else is.** It is NIP-01's own
+    tie-break; ids are compared as plain strings.
+24. **Overdraw rejects in full, and `void` makes it final.** No partial
+    application and no clamping. Before settlement a rejection is a function of
+    the inputs; the owner's manifest voids it, after which it never applies
+    against any later balance. Without `void`, a rejected spend would silently
+    apply the moment the owner's next snapshot held enough.
+25. **Explicit ids, no watermark.** Settlement is by spend id reachable through
+    the chain. `created_at` never decides whether a spend is folded, because a
+    relay can deliver an older spend after a newer snapshot.
+26. **Duplicate references in a manifest reject.** Deduplicating would let an
+    ambiguous manifest change balances; ambiguity here is an error.
+27. **A zero-reference manifest is invalid.** It settles nothing, and the next
+    snapshot simply keeps the previous reference.
+28. **Unresolved is a state, not a number.** When the chain cannot be walked,
+    `resolveGameInventoryState` returns no state at all. Assuming unknown spends
+    folded hides debits; assuming them pending double-debits the owner.
+29. **No base-snapshot reference in the manifest.** Relays keep only the newest
+    `kind:31633`, so a base reference could never be verified by a reader; the
+    inventory address plus the `previous` chain already determines the settled
+    set; and the owner-side "has the head moved" check is what `revision` is
+    for.
+30. **Manifest first, snapshot second.** An orphan manifest is harmless; a
+    snapshot referencing an unretrievable manifest is not.
+31. **The `fold` reference is builder-managed on kind:31633.** Like `grant`, it
+    is stripped from `preserveTags`, regenerated from `fold`, and rejected in
+    `extraTags`, so a rewrite never strands a stale duplicate and never
+    silently un-folds a chain.
+
 ### kind:31634 decisions
 
 12. **`content` is required and authoritative.** Unlike the other two kinds, a
@@ -914,8 +1131,12 @@ src/
     game-item-placement/         # kind 31634
       { types, guards, address, tags, content, validate, parse, build,
         helpers, revision, index }
+    game-inventory-spend/        # kind 1416
+      { constants, types, validate, parse, build, order, filter, derive, index }
+    game-inventory-fold/         # kind 1417
+      { constants, types, validate, parse, build, filter, chain, state, index }
 test/                            # vitest suites
-docs/                            # the three protocol drafts
+docs/                            # the protocol drafts
 ```
 
 ## Scripts

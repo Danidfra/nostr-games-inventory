@@ -6,6 +6,102 @@ This project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 While the major version is `0`, minor bumps may add public API but aim to stay
 backward compatible.
 
+## Unreleased
+
+Adds an append-only **cross-application spend model** on top of kind:31633:
+**kind:1416 Game Inventory Spend** and **kind:1417 Game Inventory Fold
+Manifest**. An application other than an inventory's designated writer can now
+debit the inventory without replacing its snapshot, readers derive the
+effective balance deterministically, and the owner folds outstanding spends
+into its next snapshot with an explicit, auditable manifest.
+
+Fully additive: every 0.4.0 API behaves exactly as before, no existing type
+changed shape except for one new optional field, and an inventory with no fold
+reference parses exactly as before.
+
+### Added
+
+- **kind:1416 Game Inventory Spend** — `KIND_GAME_INVENTORY_SPEND`,
+  `parseGameInventorySpend`, `parseGameInventorySpendResult`,
+  `validateGameInventorySpend`, `buildGameInventorySpendEvent`,
+  `buildGameInventorySpendFilter`, the markers `INVENTORY_MARKER` (`inventory`)
+  and `SPEND_ITEM_MARKER` (`item`), `SPEND_QUANTITY_TAG`, and the types
+  `GameInventorySpend`, `BuildGameInventorySpendInput`,
+  `SpendValidationIssue`, `SpendValidationResult`. A spend debits exactly one
+  item from exactly one inventory, references both by full address, carries a
+  positive integer quantity, and is valid only when its author is the
+  inventory owner. `purpose`, `client`, `nonce` and `alt` are preserved and
+  never affect accounting.
+- **Deterministic ordering** — `compareGameInventorySpendOrder` and
+  `sortGameInventorySpends` implement the normative `(created_at asc, id asc)`
+  order; `GameInventorySpendOrderKey`.
+- **Derivation** — `deriveGameInventoryState` walks pending spends in order and
+  returns the effective inventory as a regular `GameInventory` plus per-spend
+  status (`applied`, `rejected`, `folded`, `voided`, `ignored`, `invalid`) and
+  the relay-duplicate ids. Overdraws reject in full; nothing is clamped;
+  output is independent of input order. Types `GameInventorySpendApplication`,
+  `GameInventoryDerivedState`, `DeriveGameInventoryStateInput`.
+- **kind:1417 Game Inventory Fold Manifest** — `KIND_GAME_INVENTORY_FOLD`,
+  `parseGameInventoryFold`, `parseGameInventoryFoldResult`,
+  `validateGameInventoryFold`, `buildGameInventoryFoldEvent`,
+  `toBuildGameInventoryFoldInput`, `buildGameInventoryFoldFilter`, markers
+  `FOLD_PREVIOUS_MARKER`, `FOLD_SPEND_MARKER`, `FOLD_VOID_MARKER`, and types
+  `GameInventoryFold`, `GameInventoryEventReference`,
+  `BuildGameInventoryFoldInput`, `FoldValidationIssue`, `FoldValidationResult`.
+  A manifest lists applied spends as `spend` and rejected ones as `void`,
+  optionally chains to its predecessor, and rejects duplicate references and
+  empty manifests.
+- **Fold-chain resolution** — `resolveGameInventoryFoldChain` walks a chain
+  head-first, stops on cycles, and returns `resolved` or `unresolved` with the
+  folded, voided and settled ids, blocking `problems` and non-blocking
+  `warnings`; optionally verifies referenced spends. Types
+  `GameInventoryFoldResolution`, `GameInventoryFoldProblem`,
+  `GameInventoryFoldWarning` and their code unions.
+- **`resolveGameInventoryState`** — the reader's entry point: chain resolution
+  plus derivation, returning no state at all when the chain is unresolved.
+  Types `GameInventoryStateResolution`, `ResolveGameInventoryStateInput`.
+- **kind:31633 fold reference** — an `e` tag marked `fold` naming the
+  manifest the snapshot incorporates, exposed as `GameInventory.fold`
+  (`GameInventoryFoldReference`), emitted from `BuildGameInventoryInput.fold`
+  (`BuildGameInventoryFoldReferenceInput`), preserved by
+  `toBuildGameInventoryInput`, and managed by the builder (stripped from
+  `preserveTags`, rejected in `extraTags`). `INVENTORY_FOLD_MARKER`.
+- Parse warning codes `invalid-fold-tag`, `duplicate-fold-reference` and
+  `invalid-metadata-tag` on `ParseWarningCode`.
+
+### Changed
+
+- `buildGameInventoryEvent` now rejects an `e` tag marked `fold` supplied
+  through `extraTags`, the same way it rejects a `grant` one. Previously the
+  marker had no meaning for this kind.
+- `parseGameInventoryResult` reports a second `fold` reference as
+  `duplicate-fold-reference` (first kept) in permissive mode and rejects it in
+  strict mode.
+- Internal only: `isHex64` added to `common/strings.ts`.
+
+### Documentation
+
+- **`docs/1416-1417-game-inventory-spend.md`** — the normative protocol:
+  terminology (valid / pending / applied / rejected / folded / voided /
+  settled), kind:1416 and kind:1417 schemas with valid and invalid examples,
+  the deterministic derivation algorithm, fold-chain resolution and its failure
+  handling, publication order and recovery, why there is no timestamp
+  watermark, relay incompleteness, the security model, residual concurrency
+  limitations, why the manifest carries no base-snapshot reference, and nine
+  worked examples.
+- `docs/31633-game-inventory.md` — the optional fold reference, what snapshot
+  quantities mean once spends exist, the one-writer convention, and the
+  separation from `revision`.
+- README — the two new kinds, their API, the owner's cycle, and twelve recorded
+  design decisions.
+
+### Not included in this version
+
+- No grant, transfer, reservation, conversion or crafting kind.
+- No batch (multi-item) spends, no replaceable pending-spend buffer, no
+  commitment / accumulator manifests, no base-snapshot reference in the
+  manifest.
+
 ## 0.4.0
 
 Strengthens **kind:31633 Game Inventory** so that a writer can replace an

@@ -15,7 +15,7 @@ import {
   addQuantitiesChecked,
 } from "./quantity.internal.js";
 import { encodeInventoryQuantity } from "./quantity.js";
-import { GRANT_MARKER } from "./address.js";
+import { GRANT_MARKER, INVENTORY_FOLD_MARKER } from "./address.js";
 import { INVENTORY_REVISION_TAG, encodeInventoryRevision } from "./revision.js";
 import type {
   BuildGameInventoryInput,
@@ -52,6 +52,8 @@ const MANAGED_TAG_NAMES = new Set<string>([
  * - resolves duplicate addresses per `duplicateStrategy` (default `last`), and
  *   throws if a `sum` overflows Number.MAX_SAFE_INTEGER;
  * - rejects grants with an empty/whitespace-only event id;
+ * - emits the optional fold manifest reference as
+ *   `["e", "<fold-id>", "<relay>", "fold"]`, rejecting a blank id;
  * - emits tags in a stable, deterministic order;
  * - never creates `id` or `sig`;
  * - validates `revision` (a non-negative safe integer) and emits it as a
@@ -64,15 +66,15 @@ const MANAGED_TAG_NAMES = new Set<string>([
  * Emitted tag order is fixed and deterministic:
  *
  * ```text
- * d -> revision -> context* -> name -> a* -> e(grant)* -> alt
+ * d -> revision -> context* -> name -> a* -> e(grant)* -> e(fold) -> alt
  *   -> preserved tags -> extraTags
  * ```
  *
  * Non-empty display values are never trimmed or otherwise normalized.
  *
  * @throws {Error} for a blank `id`, invalid item address, invalid quantity,
- * duplicate under the `strict` strategy, `sum` overflow, a blank grant event
- * id, or an `extraTags` entry that conflicts with a managed tag.
+ * duplicate under the `strict` strategy, `sum` overflow, a blank grant or fold
+ * event id, or an `extraTags` entry that conflicts with a managed tag.
  */
 export function buildGameInventoryEvent(
   input: BuildGameInventoryInput,
@@ -130,6 +132,20 @@ export function buildGameInventoryEvent(
       );
     }
     tags.push(["e", grant.eventId, grant.relay ?? "", GRANT_MARKER]);
+  }
+
+  if (input.fold !== undefined) {
+    if (isBlank(input.fold.eventId)) {
+      throw new Error(
+        "buildGameInventoryEvent: fold `eventId` must be non-empty",
+      );
+    }
+    tags.push([
+      "e",
+      input.fold.eventId,
+      input.fold.relay ?? "",
+      INVENTORY_FOLD_MARKER,
+    ]);
   }
 
   if (input.alt !== undefined && !isBlank(input.alt)) {
@@ -212,10 +228,10 @@ function normalizeItems(
 /**
  * Reject `extraTags` that conflict with builder-managed tags.
  *
- * Rejected: `d`, `context`, `name`, `alt`; every `a` tag (all `a` tags are the
- * inventory item representation in kind:31633); and `e` tags carrying the
- * `grant` marker at index 3. Unrelated forward-compatible tags — including
- * non-grant `e` tags — are allowed.
+ * Rejected: `d`, `revision`, `context`, `name`, `alt`; every `a` tag (all `a`
+ * tags are the inventory item representation in kind:31633); and `e` tags
+ * carrying the `grant` or `fold` marker at index 3. Unrelated
+ * forward-compatible tags — including other `e` tags — are allowed.
  */
 function assertExtraTagAllowed(tag: string[]): void {
   const name = tag[0];
@@ -235,6 +251,11 @@ function assertExtraTagAllowed(tag: string[]): void {
         "buildGameInventoryEvent: `extraTags` may not contain a grant `e` tag; pass it via `grants` instead",
       );
     }
+    if (tag[3] === INVENTORY_FOLD_MARKER) {
+      throw new Error(
+        "buildGameInventoryEvent: `extraTags` may not contain a fold `e` tag; pass it via `fold` instead",
+      );
+    }
     return;
   }
 
@@ -251,8 +272,8 @@ function assertExtraTagAllowed(tag: string[]): void {
  *
  * Every `a` tag is managed: in kind:31633 an `a` tag *is* the item
  * representation, and items are rebuilt from `items`. An `e` tag is only
- * managed when it carries the `grant` marker, so unrelated and future `e`
- * relationships written by other clients survive a rewrite.
+ * managed when it carries the `grant` or `fold` marker, so unrelated and
+ * future `e` relationships written by other clients survive a rewrite.
  */
 function isManagedInventoryTag(tag: string[]): boolean {
   const name = tag[0];
@@ -265,7 +286,10 @@ function isManagedInventoryTag(tag: string[]): boolean {
   if (name === "a") {
     return true;
   }
-  if (name === "e" && tag[3] === GRANT_MARKER) {
+  if (
+    name === "e" &&
+    (tag[3] === GRANT_MARKER || tag[3] === INVENTORY_FOLD_MARKER)
+  ) {
     return true;
   }
   return false;
@@ -295,6 +319,9 @@ function isManagedInventoryTag(tag: string[]): boolean {
  *   revision: (next.revision ?? 0) + 1,
  * });
  * ```
+ *
+ * The fold manifest reference round-trips too. That is what keeps a rewrite
+ * that folds nothing new from silently un-folding every spend in the chain.
  *
  * Note that only *valid* data round-trips. Item references the parser rejected
  * — a malformed address, a non-31632 coordinate, an invalid quantity — are not
@@ -330,6 +357,12 @@ export function toBuildGameInventoryInput(
   }
   if (inventory.revision !== undefined) {
     result.revision = inventory.revision;
+  }
+  if (inventory.fold !== undefined) {
+    result.fold = {
+      eventId: inventory.fold.eventId,
+      relay: inventory.fold.relay,
+    };
   }
 
   return result;

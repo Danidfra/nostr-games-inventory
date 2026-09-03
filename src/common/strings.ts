@@ -36,3 +36,11 @@ export function uniqueNonBlank(
   }
   return result;
 }
+
+/**
+ * `true` for a canonical 64-character lowercase hexadecimal string — the form
+ * of a Nostr event id or pubkey.
+ */
+export function isHex64(value: string): boolean {
+  return /^[0-9a-f]{64}$/.test(value);
+}

@@ -19,11 +19,16 @@ import { parseInventoryQuantity } from "./quantity.js";
 import { INVENTORY_REVISION_TAG, parseInventoryRevision } from "./revision.js";
 import { MAX_QUANTITY } from "./quantity.internal.js";
 import { validateGameInventory } from "./validate.js";
-import { GRANT_MARKER, buildGameInventoryAddress } from "./address.js";
+import {
+  GRANT_MARKER,
+  INVENTORY_FOLD_MARKER,
+  buildGameInventoryAddress,
+} from "./address.js";
 import type {
   GameInventory,
   GameInventoryItem,
   GameInventoryGrantReference,
+  GameInventoryFoldReference,
   DuplicateStrategy,
 } from "./types.js";
 
@@ -71,6 +76,12 @@ export interface ParseGameInventoryOptions {
  * malformed, reference a non-31632 kind, or carry an invalid quantity are
  * ignored and reported as warnings. Malformed grant tags are ignored with an
  * `invalid-grant-tag` warning.
+ *
+ * A fold reference (`e` tag marked `fold`) with a blank event id is ignored
+ * with an `invalid-fold-tag` warning. More than one fold reference is a
+ * `duplicate-fold-reference`: the first valid one is kept in permissive mode
+ * and the event is rejected in strict mode. An inventory that carries no fold
+ * reference is the normal pre-spend state and parses exactly as before.
  *
  * A malformed `revision` tag is ignored with an `invalid-revision` warning in
  * permissive mode and rejects the event in strict mode. It is deliberately NOT
@@ -185,6 +196,18 @@ export function parseGameInventoryResult(
 
   const grants = parseGrants(event.tags, requireHexEventId, warnings);
 
+  const foldParsed = parseFoldReference(
+    event.tags,
+    requireHexEventId,
+    warnings,
+  );
+  if (!foldParsed.ok) {
+    if (mode === "strict") {
+      return fail(foldParsed.error, warnings);
+    }
+  }
+  const fold = foldParsed.fold;
+
   const contentParsed = parseContentJson(event.content);
   let contentJson: unknown;
   if (contentParsed.kind === "json") {
@@ -219,6 +242,9 @@ export function parseGameInventoryResult(
   }
   if (revision !== undefined) {
     inventory.revision = revision;
+  }
+  if (fold !== undefined) {
+    inventory.fold = fold;
   }
   if (contentJson !== undefined) {
     inventory.contentJson = contentJson;
@@ -340,4 +366,68 @@ function parseGrants(
     grants.push({ eventId, relay: tag[2] ?? "" });
   }
   return grants;
+}
+
+interface FoldReferenceParse {
+  /** `false` only when more than one fold reference was found. */
+  ok: boolean;
+  error: string;
+  fold: GameInventoryFoldReference | undefined;
+}
+
+/**
+ * Read the single `e` tag marked `fold`.
+ *
+ * A blank id is ignored with `invalid-fold-tag`. A second valid reference is a
+ * `duplicate-fold-reference`: the FIRST valid one is kept, because a snapshot
+ * only ever has one fold lineage and a later tag cannot make an earlier one
+ * mean less. Strict mode turns the duplicate into a rejection (reported via
+ * `ok: false`); permissive mode keeps the inventory readable.
+ */
+function parseFoldReference(
+  tags: string[][],
+  requireHexEventId: boolean,
+  warnings: ParseWarning[],
+): FoldReferenceParse {
+  let fold: GameInventoryFoldReference | undefined;
+  let duplicate = false;
+  for (const tag of tags) {
+    if (tag[0] !== "e" || tag[3] !== INVENTORY_FOLD_MARKER) {
+      continue;
+    }
+    const eventId = tag[1];
+    if (typeof eventId !== "string" || isBlank(eventId)) {
+      warnings.push({
+        code: "invalid-fold-tag",
+        message: "Fold `e` tag is missing an event id; ignored",
+        tag,
+      });
+      continue;
+    }
+    if (requireHexEventId && !HEX64.test(eventId)) {
+      warnings.push({
+        code: "invalid-fold-tag",
+        message: `Fold \`e\` tag event id is not canonical 64-char hex; ignored: ${eventId}`,
+        tag,
+      });
+      continue;
+    }
+    if (fold !== undefined) {
+      duplicate = true;
+      warnings.push({
+        code: "duplicate-fold-reference",
+        message: `More than one fold reference; keeping the first (${fold.eventId}) and ignoring: ${eventId}`,
+        tag,
+      });
+      continue;
+    }
+    fold = { eventId, relay: tag[2] ?? "" };
+  }
+  return {
+    ok: !duplicate,
+    error: duplicate
+      ? "More than one `e` tag marked `fold`; an inventory has exactly one fold lineage"
+      : "",
+    fold,
+  };
 }

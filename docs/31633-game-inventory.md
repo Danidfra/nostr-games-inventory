@@ -34,6 +34,8 @@ It does not prove that the user received the item from an official source. Grant
 
 It does not describe where an item is equipped or placed. Equipment and placement are represented by game-specific state or by a separate placement event.
 
+It is a **consolidated snapshot**, not a ledger. Debits made by other applications between two snapshots are represented by separate, append-only `kind:1416` spend events, and are incorporated into the next snapshot through a `kind:1417` fold manifest. See [`docs/1416-1417-game-inventory-spend.md`](./1416-1417-game-inventory-spend.md) and [Optional fold reference](#optional-fold-reference).
+
 ## Inventory identity
 
 The `d` tag identifies the inventory context.
@@ -263,6 +265,50 @@ Clients MUST NOT require grant references in order to parse an inventory.
 
 Grant references MAY be used by clients to audit whether an inventory is backed by issuer-signed grants.
 
+## Optional fold reference
+
+A `kind:31633` inventory MAY reference the `kind:1417` fold manifest whose spends its quantities already incorporate, using an `e` tag with the marker `fold`.
+
+```json
+["e", "<fold-manifest-id>", "<relay-url>", "fold"]
+```
+
+If the relay URL is unknown, the third element SHOULD be an empty string.
+
+Its meaning is exact:
+
+```text
+The quantities in this snapshot already incorporate every kind:1416 spend
+listed as `spend` in the referenced manifest and in every manifest reachable
+through its `previous` chain; every spend listed as `void` anywhere in that
+chain is permanently not applicable.
+```
+
+Readers that support spends therefore derive:
+
+```text
+effective balance = snapshot quantities − applicable spends not reachable through the fold chain
+```
+
+Rules:
+
+- An inventory MUST NOT carry more than one fold reference. A permissive parser SHOULD keep the first and report a warning; a strict parser MAY reject.
+- An inventory with **no** fold reference has incorporated no spend. Every valid spend against it is pending. This is the state of every inventory written before spends existed and of every inventory that has never folded; it is fully valid and MUST be parsed exactly as before.
+- A snapshot that folds new spends MUST reference the new manifest. A snapshot that folds nothing new MUST keep referencing the manifest its base referenced. Dropping the reference makes every spend in the chain pending again and debits the owner a second time. The round-trip in [Preserving data a writer does not own](#preserving-data-a-writer-does-not-own) carries it over.
+- A snapshot whose manifest cannot be retrieved MUST be reported as unresolved by spend-aware readers, which MUST NOT derive a balance from it by guessing. The raw quantities remain the owner's last consolidated statement.
+
+### What the quantities mean once spends exist
+
+The `a` tag quantities are the **last consolidated** ownership, written by the inventory's designated writer. Between two snapshots, `kind:1416` spends by the owner MAY make those quantities temporarily stale. Compliant spend-aware readers derive the effective quantities as above; clients unaware of `kind:1416` still see the last consolidated snapshot and may temporarily over-report an item that has pending spends, until the owner's next snapshot folds them. That is an accepted limitation of the version transition.
+
+### One writer per context
+
+The purpose of the spend model is that an application other than the inventory's owner-application never has to replace the snapshot: it debits with a spend and leaves the replacement to the context's designated writer. "One replacement writer per inventory context" is an application-level coordination convention that avoids lost updates between honest applications. It is not enforced by the protocol, which cannot stop a player (or a modified client holding their key) from replacing any of their own inventories.
+
+### Relationship to `revision`
+
+`revision` is unrelated to folds. It is not a lock, not compare-and-swap, not a spend order, and not evidence that any spend was folded, and it MUST NOT be reused as a spend checkpoint. A snapshot that folds spends is an ordinary replacement and follows the ordinary revision rules; whether it folded anything is stated by the fold reference alone.
+
 ## Content
 
 The `content` field SHOULD be empty by default.
@@ -373,7 +419,7 @@ Clients SHOULD treat inventory state and grant verification as separate concerns
 
 ## Verification model
 
-A client that wants to verify inventory authenticity MAY compare the declared inventory against grant, spend, use, or conversion events.
+A client that wants to verify inventory authenticity MAY compare the declared inventory against grant, spend, use, or conversion events. The spend event is `kind:1416`, defined in [`docs/1416-1417-game-inventory-spend.md`](./1416-1417-game-inventory-spend.md); grants remain undefined.
 
 For example:
 
@@ -402,7 +448,7 @@ When publishing an updated inventory, clients SHOULD include the complete curren
 
 Clients SHOULD NOT publish partial inventory diffs using `kind:31633`.
 
-Partial changes, receipts, grants, spends, or conversions SHOULD be represented by separate regular events.
+Partial changes, receipts, grants, spends, or conversions SHOULD be represented by separate regular events. For spends that separate event is `kind:1416`.
 
 ### Preserving data a writer does not own
 
@@ -414,6 +460,7 @@ A client publishing an updated inventory therefore MUST preserve:
 item references it did not intend to change
 context, name and alt tags
 grant references
+the fold reference
 the content field
 every tag it does not recognise
 ```
@@ -538,6 +585,8 @@ A client or library SHOULD tolerate:
 ```text
 unknown tags
 a malformed revision tag (ignore it; do not reject the inventory)
+a fold reference it cannot resolve (report it; do not guess a balance)
+a blank fold reference (ignore it with a warning)
 missing context
 missing name
 missing alt
@@ -558,6 +607,7 @@ grant references it cannot resolve
 | `name`     | no       | no       | Human-readable inventory name                |
 | `alt`      | no       | no       | Human-readable fallback                      |
 | `e`        | no       | yes      | Optional grant reference with marker `grant` |
+| `e`        | no       | no       | Optional fold reference with marker `fold`   |
 
 ## `a` tag format
 
@@ -589,6 +639,21 @@ Field meanings:
 | `2`   | Relay URL or empty string |
 | `3`   | Marker, always `"grant"`  |
 
+## `e` fold tag format
+
+```json
+["e", "<fold-manifest-id>", "<relay-url>", "fold"]
+```
+
+Field meanings:
+
+| Index | Meaning                   |
+| ----- | ------------------------- |
+| `0`   | `"e"`                     |
+| `1`   | Fold manifest event id    |
+| `2`   | Relay URL or empty string |
+| `3`   | Marker, always `"fold"`   |
+
 ## Library functions
 
 A `@nostr-games/inventory` package SHOULD expose helpers similar to:
@@ -610,6 +675,7 @@ export interface GameInventory {
   name?: string;
   items: GameInventoryItem[];
   grantEventIds: string[];
+  fold?: { eventId: string; relay: string };
   content?: unknown;
   event: NostrEvent;
 }
@@ -702,7 +768,9 @@ Optional advisory revision: ["revision", "<non-negative-integer>"]
 Inventory contexts per owner: many; d is opaque and application-defined
 Discovery: {"kinds":[31633],"authors":["<pubkey>"]} returns them all
 Optional grant references: ["e", "<grant-event-id>", "<relay-url>", "grant"]
+Optional fold reference: ["e", "<fold-manifest-id>", "<relay-url>", "fold"], at most one
 Content: empty by default, optional JSON metadata
-Purpose: declare item ownership and quantities for one inventory context
+Purpose: declare the last consolidated item ownership and quantities for one inventory context
+Effective balance (spend-aware readers): snapshot − applicable kind:1416 spends not reachable through the fold chain
 Not purpose: item definition, grant proof, placement, equipment, consumption, conversion
 ```

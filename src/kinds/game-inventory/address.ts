@@ -15,6 +15,22 @@ export { KIND_GAME_INVENTORY, type KindGameInventory };
  */
 export const GRANT_MARKER = "grant" as const;
 
+/**
+ * The marker used on an `e` tag to reference the kind:1417 fold manifest whose
+ * spends this snapshot has incorporated:
+ * `["e", "<fold-manifest-id>", "<relay-url>", "fold"]`.
+ *
+ * At most one fold reference is valid per inventory event.
+ */
+export const INVENTORY_FOLD_MARKER = "fold" as const;
+
+/**
+ * The marker used on an `a` tag, in kind:1416 and kind:1417 events, to
+ * reference the `31633:<owner>:<d>` inventory the event applies to:
+ * `["a", "31633:<owner-pubkey>:<inventory-d-tag>", "<relay-url>", "inventory"]`.
+ */
+export const INVENTORY_MARKER = "inventory" as const;
+
 export interface GameInventoryAddress {
   kind: KindGameInventory;
   pubkey: string;

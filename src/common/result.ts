@@ -53,7 +53,11 @@ export type ParseWarningCode =
   | "duplicate-target-tag"
   | "missing-item-tag"
   | "orphaned-item-tag"
-  | "duplicate-item-tag";
+  | "duplicate-item-tag"
+  // kind:31633 fold reference, kind:1416 / kind:1417 metadata
+  | "invalid-fold-tag"
+  | "duplicate-fold-reference"
+  | "invalid-metadata-tag";
 
 /**
  * Structured parse result.

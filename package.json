@@ -1,7 +1,7 @@
 {
   "name": "@nostr-games/inventory",
   "version": "0.4.0",
-  "description": "Framework-independent TypeScript library for Nostr game item definitions (kind:31632), game inventories (kind:31633) and game item placements (kind:31634).",
+  "description": "Framework-independent TypeScript library for Nostr game item definitions (kind:31632), game inventories (kind:31633), game item placements (kind:31634), and append-only inventory spends and fold manifests (kind:1416, kind:1417).",
   "license": "MIT",
   "type": "module",
   "sideEffects": false,
@@ -52,9 +52,12 @@
     "placement",
     "equipment",
     "nip",
+    "spend",
     "31632",
     "31633",
-    "31634"
+    "31634",
+    "1416",
+    "1417"
   ],
   "devDependencies": {
     "@eslint/js": "^9.17.0",

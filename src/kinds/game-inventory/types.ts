@@ -24,6 +24,21 @@ export interface GameInventoryGrantReference {
 }
 
 /**
+ * A reference to the kind:1417 fold manifest this snapshot incorporates,
+ * declared with an `e` tag marked `fold`.
+ *
+ * The quantities of a snapshot carrying this reference already account for
+ * every spend listed in the manifest and every spend reachable through the
+ * manifest's `previous` chain. See `docs/1416-1417-game-inventory-spend.md`.
+ */
+export interface GameInventoryFoldReference {
+  /** The referenced fold manifest event id. */
+  eventId: string;
+  /** Relay URL hint, or `""` when unknown. */
+  relay: string;
+}
+
+/**
  * A parsed kind:31633 Game Inventory.
  *
  * Tags are the source of truth. `content` holds the raw content string; parsed
@@ -60,6 +75,15 @@ export interface GameInventory {
   grants: GameInventoryGrantReference[];
   /** Convenience: grant event ids only. */
   grantEventIds: string[];
+  /**
+   * The fold manifest reference from the `e` tag marked `fold`, when present.
+   *
+   * Absent on every inventory written before spend support existed and on
+   * every inventory that has never folded a spend. Absence means "no spend has
+   * been incorporated": readers that support kind:1416 treat every valid spend
+   * against this inventory as pending.
+   */
+  fold?: GameInventoryFoldReference;
 
   /** Raw `content` string, preserved exactly as received. */
   content: string;
@@ -89,6 +113,15 @@ export interface BuildGameInventoryGrantInput {
 }
 
 /**
+ * Input for the optional fold manifest reference, emitted as
+ * `["e", "<fold-manifest-id>", "<relay-url>", "fold"]`.
+ */
+export interface BuildGameInventoryFoldReferenceInput {
+  eventId: string;
+  relay?: string;
+}
+
+/**
  * Strategy for handling duplicate item addresses when building or parsing.
  *
  * - `last` (spec default): keep the last valid quantity.
@@ -108,6 +141,18 @@ export interface BuildGameInventoryInput {
   name?: string;
   alt?: string;
   grants?: BuildGameInventoryGrantInput[];
+  /**
+   * The kind:1417 fold manifest whose spends this snapshot's quantities
+   * already incorporate. Omit it for an inventory that has never folded a
+   * spend.
+   *
+   * A snapshot that incorporates newly folded spends MUST reference the new
+   * manifest; a snapshot that folds nothing new MUST keep referencing the
+   * manifest its base referenced (the round-trip via
+   * {@link toBuildGameInventoryInput} carries it over). Dropping the reference
+   * makes every spend in the chain pending again and double-debits the owner.
+   */
+  fold?: BuildGameInventoryFoldReferenceInput;
   /** Optional content; string or JSON-serializable value. Defaults to `""`. */
   content?: unknown;
   /**
@@ -130,8 +175,8 @@ export interface BuildGameInventoryInput {
    *
    * Stripped as stale (they are regenerated from the structured fields):
    * `d`, `revision`, `context`, `name`, `alt`, every `a` tag, and `e` tags
-   * carrying the `grant` marker. Everything else survives in its original
-   * relative order.
+   * carrying the `grant` or `fold` marker. Everything else survives in its
+   * original relative order.
    */
   preserveTags?: string[][];
   /**
@@ -147,9 +192,10 @@ export interface BuildGameInventoryInput {
    * throws), not silently duplicated. Rejected: `d`, `revision`, `context`,
    * `name`, `alt`;
    * every `a` tag (all `a` tags represent inventory items in kind:31633 — pass
-   * items via `items`); and `e` tags carrying the `grant` marker (pass grants
-   * via `grants`). Unrelated forward-compatible tags, including non-grant `e`
-   * tags, are allowed.
+   * items via `items`); `e` tags carrying the `grant` marker (pass grants via
+   * `grants`); and `e` tags carrying the `fold` marker (pass the reference via
+   * `fold`). Unrelated forward-compatible tags, including other `e` tags, are
+   * allowed.
    */
   extraTags?: string[][];
 }
