@@ -1,487 +1,238 @@
 # @nostr-games/inventory
 
-Framework-independent TypeScript library implementing five Nostr event kinds
-for games:
+TypeScript library for describing game items, inventories and item placements
+as Nostr events, plus an append-only spend model so that more than one
+application can debit the same inventory without overwriting it.
 
-- **`kind:31632`** — Game Item Definition — _what an item is_
-- **`kind:31633`** — Game Inventory — _which items are held, and how many_
-- **`kind:31634`** — Game Item Placement — _where items are equipped or placed_
-- **`kind:1416`** — Game Inventory Spend — _an append-only, owner-signed debit
-  against one inventory_
-- **`kind:1417`** — Game Inventory Fold Manifest — _which spends a snapshot has
-  incorporated_
+It covers five event kinds. The kinds are draft specifications written and
+maintained in this repository (see [`docs/`](./docs)). They are not accepted
+NIPs and not an official Nostr standard.
 
-It provides constants, types, parsers, builders, validators and helpers for
-these kinds. It is pure, has no import-time side effects, no framework or
-application dependencies, and works in both browser and Node environments.
+The package is the protocol layer only: constants, types, parsers, validators,
+builders, relay-filter builders and pure state derivation. It never signs,
+fetches, publishes, stores, or decides whom to trust. It has no runtime
+dependencies and no import-time side effects, and any object shaped like a
+Nostr event (for example one from `nostr-tools`) can be passed in.
 
-> Status: published to npm. This is the protocol layer only. No React, hooks,
-> UI, relay clients, signers, encryption, grants, persistence, or publishing are
-> included.
+## Event kinds
 
-## Responsibility boundaries
+| Kind    | Type        | Question it answers                                  | Spec                                                                |
+| ------- | ----------- | ---------------------------------------------------- | ------------------------------------------------------------------- |
+| `31632` | addressable | What is this item?                                   | [Game Item Definition](./docs/31632-game-item-definition-v2.md)     |
+| `31633` | addressable | Which items does this owner hold, and how many?      | [Game Inventory](./docs/31633-game-inventory.md)                    |
+| `31634` | addressable | Where are items equipped or placed?                  | [Game Item Placement](./docs/31634-game-item-placement.md)          |
+| `1416`  | regular     | The owner debits N of one item from one inventory.   | [Spend and Fold Manifest](./docs/1416-1417-game-inventory-spend.md) |
+| `1417`  | regular     | Which spends has an inventory snapshot incorporated? | [Spend and Fold Manifest](./docs/1416-1417-game-inventory-spend.md) |
 
-The addressable kinds answer three different questions and must not be
-conflated:
+Addressable events are identified by `<kind>:<pubkey>:<d>`. The `d` value may
+itself contain colons (for example `mygame:food:carrot`), so address parsing
+splits only on the first two colons.
+
+Each kind keeps its state in a different place:
+
+- `31632` and `31633`: the tags are the state. `content` is optional metadata
+  and may be an empty string.
+- `31634`: `content` must be a JSON object and is the state. The `a` tags are a
+  derived index so relays can answer `#a` queries.
+- `1416` and `1417`: tags only. Both are immutable regular events identified by
+  event id.
+
+Wire shapes in short:
 
 ```text
-definition != ownership != placement
-31632      != 31633    != 31634
+31632  ["d", id] ["name", …] ["type", …]                          required
+       ["image", url] ["image", url, "front"] ["t", topic] …      optional
+31633  ["d", context]  ["a", "31632:<issuer>:<d>", relay, "<qty>"]*
+       ["revision", "<n>"]  ["e", id, relay, "grant"]*  ["e", id, relay, "fold"]
+31634  content = { version?, revision?, target?, reference?, placements[] }
+       ["a", "<target>", relay, "target"] | ["target", id]   ["a", "<item>", relay, "item"]*
+1416   ["a", "31633:<owner>:<d>", relay, "inventory"] ["a", "31632:<issuer>:<d>", relay, "item"] ["quantity", "<n>"]
+1417   ["a", "31633:<owner>:<d>", relay, "inventory"] ["e", id, relay, "previous"]? ["e", id, relay, "spend" | "void"]+
 ```
 
-The two regular kinds are the append-only side of ownership:
+The `d` tag of a `31633` event is an opaque inventory context chosen by the
+application. One owner can have any number of them. The library defines no
+default context.
 
-```text
-snapshot (replaced)  != spend (only ever added)  != fold (only ever added)
-31633                != 1416                     != 1417
-```
-
-A **spend** debits one item from one inventory and is signed by the inventory
-owner. A **fold manifest** records exactly which spends a snapshot has
-incorporated. Neither replaces a snapshot; only the inventory's designated
-writer does that, and it folds outstanding spends when it does. See
-[Kind 1416 / 1417](#kind-1416--1417--spends-and-fold-manifests).
-
-A **placement** event does not define an item, does not prove ownership, does
-not grant, spend or consume anything, does not claim a reward, does not
-authorize itself, does not verify its own author, does not enforce inventory
-ownership, and does not decide whether anything should render. Those are
-application policy, or belong to future event kinds — see
-[Authorization boundary](#authorization-boundary).
-
-## Design principles
-
-- **TypeScript-first**, strict compiler settings, no `any` casts.
-- **Pure functions**, no global/module side effects.
-- **Source of truth per kind.** For `31632` and `31633` the tags are
-  authoritative and `content` is optional metadata. For `31634` the `content`
-  document is authoritative and the `a` tags are a derived index — see
-  [Content authority](#content-authority-31634).
-- **Unknown data survives.** Unknown tags, unknown content fields and unknown
-  enum-like values are preserved through parsing, mutation and rebuilding.
-- **Nothing is coerced.** Numeric strings never become numbers; `NaN` and
-  `Infinity` are never accepted where a real value is expected.
-- **No heavy dependencies.** The only Nostr type used is a minimal local
-  structural `NostrEvent` interface, so any compatible event object (e.g. from
-  `nostr-tools`) can be passed in without adding a dependency.
-
-## Install
+## Installation
 
 ```bash
 pnpm add @nostr-games/inventory
 # or: npm i @nostr-games/inventory
 ```
 
-Ships ESM + CJS + type declarations; no runtime dependencies. Node >= 18.
+ESM and CJS builds with type declarations. Node 18 or newer.
 
-To work on the library itself:
+## Quick example
 
-```bash
-pnpm install
-pnpm run build
-```
-
-See [CHANGELOG.md](./CHANGELOG.md) for release notes.
-
-## Public API
-
-### Constants
+`kind:31633` is addressable, so publishing replaces the whole event. Anything
+you do not carry over is gone for every other client too. The read-modify-write
+path below keeps the tags this library does not manage, including ones it does
+not understand.
 
 ```ts
-KIND_GAME_ITEM_DEFINITION; // 31632
-KIND_GAME_INVENTORY; // 31633
-KIND_GAME_ITEM_PLACEMENT; // 31634
-KIND_GAME_INVENTORY_SPEND; // 1416
-KIND_GAME_INVENTORY_FOLD; // 1417
-```
+import {
+  parseGameInventoryResult,
+  addInventoryItemQuantity,
+  toBuildGameInventoryInput,
+  buildGameInventoryEvent,
+  buildGameItemAddress,
+} from "@nostr-games/inventory";
 
-### Nostr types
+// 1. Read the newest kind:31633 event for this owner and context.
+const parsed = parseGameInventoryResult(newestEventFromRelay);
+if (!parsed.ok) throw new Error(parsed.error);
+const inventory = parsed.value; // parsed.warnings lists ignored tags
 
-```ts
-interface NostrEvent {
-  id;
-  pubkey;
-  created_at;
-  kind;
-  tags;
-  content;
-  sig;
-}
-interface UnsignedEventTemplate<K> {
-  kind: K;
-  content: string;
-  tags: string[][];
-}
-```
+// 2. Change it. Helpers return a new object and never mutate the input.
+const carrot = buildGameItemAddress("<issuer-pubkey>", "mygame:food:carrot");
+const next = addInventoryItemQuantity(inventory, carrot, 3);
 
-Builders return an `UnsignedEventTemplate`. They never create `id` or `sig`
-and never sign. `pubkey` / `created_at` are added by your signing layer.
-
-### Address helpers
-
-```ts
-buildAddressableEventAddress(kind, pubkey, identifier): string
-parseAddressableEventAddress(address, options?): AddressableEventAddress | null
-
-buildGameItemAddress(pubkey, itemId): string
-parseGameItemAddress(address, options?): GameItemAddress | null
-
-buildGameInventoryAddress(ownerPubkey, inventoryId): string
-parseGameInventoryAddress(address, options?): GameInventoryAddress | null
-
-buildGameItemPlacementAddress(pubkey, placementId): string
-parseGameItemPlacementAddress(address, options?): GameItemPlacementAddress | null
-
-getDTag(event | tags): string | undefined
-```
-
-Addresses are `<kind>:<pubkey>:<d>`. **The `d` component may contain colons**
-(e.g. `blobbi:food:carrot`), so parsing splits only on the first two colons and
-treats the remainder as the identifier.
-
-By default the pubkey segment may be any non-empty string (the specs use
-placeholder pubkeys like `pubkey123`). Pass `{ requireHexPubkey: true }` to
-require a 64-char lowercase-hex pubkey.
-
-### Kind 31632 — Game Item Definition
-
-```ts
-parseGameItemDefinition(event, options?): GameItemDefinition | null
-parseGameItemDefinitionResult(event, options?): ParseResult<GameItemDefinition>
-buildGameItemDefinitionEvent(input): UnsignedEventTemplate<31632>
-validateGameItemDefinition(event, options?): ItemDefinitionValidationResult
-buildGameItemDefinitionFilter(options?): GameItemDefinitionFilter
-```
-
-`buildGameItemDefinitionFilter` resolves the definitions an inventory references
-(`{ authors: [issuer], itemIds: [...] }` — one issuer at a time, since the two
-fields intersect and two issuers may share a `d`), or discovers items by
-category (`{ topics: ["edible"] }`, which works across issuers because `t` is
-relay-indexable). Whether to trust any issuer remains application policy.
-
-#### Item images
-
-`image` is a repeatable tag. An `image` tag with no marker is the primary
-(default) image; an `image` tag with a third element carries a **view marker**:
-
-```json
-["image", "https://ex.com/hat.png"]
-["image", "https://ex.com/hat-front.png", "front"]
-```
-
-Markers defined by this version (`GAME_ITEM_IMAGE_MARKERS`): `front`,
-`side-right`, `side-left`, `back`, `diagonal-front-right`,
-`diagonal-front-left`. Unknown markers are preserved verbatim, never dropped.
-There is **no** `thumb` tag and no spritesheet/turnaround format in this
-version.
-
-A parsed definition exposes both shapes:
-
-```ts
-def.image; // string | undefined — the primary image URL
-def.images; // GameItemImage[]    — every valid image tag, in tag order
-```
-
-`image` is the first unmarked image, falling back to the first image when every
-image is marked, and `undefined` when there is no valid image tag. Image tags
-with a missing or blank URL are ignored with an `invalid-image-tag` warning.
-
-**Authoring guidance.** Official item definitions SHOULD publish **exactly one
-unmarked `image` tag**. That image is the canonical/default one: clients SHOULD
-use it for inventory, shop, list and card UI, and clients that do not
-understand view markers will use it. Marked images are pose/view-specific
-assets — they are not replacements for the primary image, and the fallback to
-the first marked view applies **only** when no unmarked image exists.
-
-This is guidance, not a requirement: an item with only marked images (or none
-at all) is still valid and parses normally. The parser reports the two
-authoring problems as non-fatal warnings, in both permissive and strict mode:
-
-| Warning                   | When                                               |
-| ------------------------- | -------------------------------------------------- |
-| `missing-primary-image`   | valid image tags exist, but all of them are marked |
-| `multiple-primary-images` | more than one unmarked image tag                   |
-
-Neither warning rejects the event, changes `image`/`images`, or makes `image`
-required (an item with no image tag at all is not warned about).
-
-```ts
-getPrimaryItemImage(item): string | undefined
-getItemImageByMarker(item, marker): GameItemImage | undefined
-getItemImagesByMarker(item, marker): GameItemImage[]
-isGameItemImageMarker(value): value is GameItemImageMarker
-```
-
-The builder takes the primary image as `image` and the views as `images`:
-
-```ts
-buildGameItemDefinitionEvent({
-  id: "blobbi:cosmetic:wizard_hat",
-  name: "Wizard Hat",
-  type: "cosmetic",
-  image: "https://ex.com/hat.png",
-  images: [
-    { url: "https://ex.com/hat-front.png", marker: "front" },
-    { url: "https://ex.com/hat-back.png", marker: "back" },
-  ],
-});
-```
-
-It emits the primary image first, then the marked views in order, skipping
-blank URLs and duplicate identical image tags. An unmarked entry in `images`
-also counts as the primary image; supplying two _different_ unmarked URLs
-throws, since the primary image would be ambiguous.
-
-### Kind 31633 — Game Inventory
-
-```ts
-parseGameInventory(event, options?): GameInventory | null
-parseGameInventoryResult(event, options?): ParseResult<GameInventory>
-buildGameInventoryEvent(input): UnsignedEventTemplate<31633>
-validateGameInventory(event, options?): InventoryValidationResult
-toBuildGameInventoryInput(inventory): BuildGameInventoryInput
-buildGameInventoryFilter(options?): GameInventoryFilter
-
-compareGameInventoryRevisions(current, incoming): GameInventoryRevisionStatus
-parseInventoryRevision(raw): number | null
-encodeInventoryRevision(value): string
-INVENTORY_REVISION_TAG // "revision"
-INVENTORY_FOLD_MARKER // "fold"  — the e-tag marker of the optional fold reference
-```
-
-#### An inventory is a context, not "the" inventory
-
-The `d` tag is an **opaque, application-defined inventory context**. A player may
-own any number of `kind:31633` events with different `d` values, all valid at
-once — a game inventory, a backpack, a chest, a character's bag, a vault. There
-is no canonical or default inventory, and this package deliberately defines no
-`d` constant.
-
-Which contexts an application writes, reads, aggregates or allows gameplay with
-is that application's policy, never a protocol rule.
-
-#### Discovering every inventory an owner has
-
-Addressable events are indexed by author and kind, so a client that knows only a
-pubkey can enumerate all of them without knowing any `d` in advance:
-
-```ts
-buildGameInventoryFilter({ authors: [pubkey] });
-// { kinds: [31633], authors: [pubkey] }  -> newest event for EVERY d
-```
-
-No index event is needed and none exists. Pass `inventoryIds` only when you
-specifically want one known context — pinning a single `#d` on the read side
-makes a client structurally unable to see any inventory but its own.
-
-#### The safe rewrite path
-
-`kind:31633` is addressable, so publishing REPLACES the whole event. Anything
-the builder does not regenerate and you do not preserve is destroyed
-permanently — for every other client too, not just yours. Rebuilding by hand
-from a couple of fields compiles, looks correct, and silently deletes the
-contexts, grants, content and unknown tags other applications wrote.
-
-`toBuildGameInventoryInput` is the path that does not lose data:
-
-```ts
-const base = parseGameInventory(newestEvent);
-const next = addInventoryItemQuantity(base, itemAddress, 1);
-
+// 3. Rebuild the full replacement, preserving unmanaged tags and the fold
+//    reference, and bump the advisory revision.
 const unsigned = buildGameInventoryEvent({
   ...toBuildGameInventoryInput(next),
   revision: (next.revision ?? 0) + 1,
 });
+// unsigned = { kind: 31633, content, tags }. Add pubkey and created_at,
+// sign and publish with your own tooling.
 ```
 
-Structured data comes back through the typed fields; every tag the builder does
-not manage comes back through `preserveTags`. Managed tags — `d`, `revision`,
-`context`, `name`, `alt`, every `a` tag, and `e` tags marked `grant` or
-`fold` — are stripped from the preserved list and regenerated, so a rebuild
-never strands a stale duplicate. Everything else survives in its original
-relative order. The fold reference (`GameInventory.fold`) round-trips too,
-which is what stops a rewrite that folds nothing new from un-folding the chain.
+`toBuildGameInventoryInput` returns the typed fields plus `preserveTags`. The
+builder strips the tags it manages (`d`, `revision`, `context`, `name`, `alt`,
+every `a` tag, and `e` tags marked `grant` or `fold`), regenerates them, and
+keeps every other tag in its original order. Only valid item references are
+republished. Tags the parser rejected stay on `inventory.event.tags` for
+inspection.
 
-Emitted tag order is fixed:
+The same pattern exists for placements: `parseGameItemPlacementResult`,
+`setEquippedPlacementForSlot`, `toBuildGameItemPlacementInput`,
+`buildGameItemPlacementEvent`.
+
+## Core behavior
+
+These rules apply to every kind.
+
+**Two parser shapes.** `parseX(event)` returns the value or `null`.
+`parseXResult(event)` returns `{ ok: true, value, warnings }` or
+`{ ok: false, error, warnings }`. Warnings carry a machine-readable code such
+as `invalid-quantity`, `malformed-address` or `duplicate-item`.
+
+**Permissive and strict modes.** Every parser takes `mode`. Structural problems
+reject in both modes: wrong kind, missing or empty `d`, missing required
+`31632` tags, a `31634` `content` that is not a JSON object, a spend or manifest
+that breaks a structural rule. Permissive mode (the default) keeps the event and
+reports recoverable problems as warnings: an invalid `31633` item tag is
+skipped, a malformed `31633` `revision` is ignored, a malformed `31634`
+placement entry is dropped, invalid JSON `content` is kept as a raw string.
+Strict mode rejects those instead. Unknown tags, fields, markers and
+enum-like values are never rejected in either mode.
+
+**Duplicate inventory items.** `duplicateStrategy` is `last`, `sum` or
+`strict`. Permissive parsing defaults to `last`; strict parsing defaults to
+`strict`.
+
+**Nothing is coerced.** Quantities are canonical positive integer strings
+(`"3"`, not `"03"`, `"+3"` or `"3.0"`). Numeric strings never become numbers.
+`NaN`, `Infinity` and unsafe integers are never accepted. Zero quantity means
+"not held": the inventory builder omits the item, and a spend of zero throws.
+
+**Throw versus result.** Caller bugs throw: an empty `id`, a malformed address,
+a non-integer amount, an `extraTags` entry that collides with a builder-managed
+tag. Data conditions return structured results, for example
+`removeInventoryItemQuantityChecked` returns
+`{ ok: false, reason: "insufficient-quantity", available, requested }` where
+`removeInventoryItemQuantity` clamps at zero.
+
+**Unknown data survives.** Parsed structures keep unknown fields through index
+signatures, placement helpers copy entries with those fields intact, and a
+placement keeps its raw `content` string and full `contentJson` (including
+entries the parser rejected) for repair work.
+
+**Builders are deterministic.** Tag order is fixed per kind and identical input
+produces identical output. Builders return `{ kind, content, tags }` and never
+create `id` or `sig`.
+
+**Relay filters.** `buildGameInventoryFilter({ authors: [pubkey] })` lists every
+inventory context an owner has, since relays index addressable events by author
+and kind. Relays match `#a` by value, not by marker, so
+`filterEventsByPlacementItemAddress` narrows placement results locally.
+
+**Pubkeys.** Address parsing accepts any non-empty pubkey segment by default so
+that fixtures and spec examples work. Pass `requireHexPubkey: true` (and, for
+spends and manifests, `requireHexEventId: true`) to require 64-character
+lowercase hex.
+
+## Spends and folds
+
+An addressable inventory has one current version. If a farm game and an island
+game both replace `31633:<player>:farm`, the last write wins and the other is
+lost. Kinds `1416` and `1417` let any application debit an inventory without
+replacing it.
 
 ```text
-d -> revision -> context* -> name -> a* -> e(grant)* -> e(fold) -> alt
-  -> preserved tags -> extraTags
+snapshot  kind:31633  replaced as a whole; by convention one application writes it
+spend     kind:1416   owner-signed debit of one item; only ever added
+fold      kind:1417   lists which spend ids a snapshot incorporated; only ever added
+
+effective balance = snapshot quantities
+                    - applied spends not reachable through the snapshot's fold chain
 ```
 
-Only _valid_ data round-trips. Item references the parser rejected are not
-republished and duplicates have already been resolved, exactly as in the
-kind:31634 round-trip; both remain on `inventory.event.tags` for repair work.
+**A spend** references exactly one inventory and exactly one item by full
+address and carries one positive integer quantity. `event.pubkey` must equal the
+owner pubkey inside the inventory address, or the event is not a spend and is
+rejected at parse time. `purpose`, `client`, `nonce` and `alt` tags are kept but
+never affect accounting. The event id is the spend's identity, so a retry
+republishes the same signed event.
 
-#### Revision semantics (31633)
+**Derivation** (`deriveGameInventoryState`) is a fixed procedure: deduplicate
+by event id, drop structurally invalid events, ignore valid spends against other
+inventories, set aside spends the fold chain has settled, sort the rest by
+`(created_at asc, id asc)`, then walk them. A spend whose quantity is at most
+the current balance is applied and decrements it. Anything else is rejected in
+full: no partial application, no clamping. The result does not depend on the
+order events arrived in. The effective inventory comes back as an ordinary
+`GameInventory`, together with the status of every candidate: `applied`,
+`rejected`, `folded`, `voided`, `ignored` or `invalid`.
 
-```ts
-compareGameInventoryRevisions(current, incoming):
-  "unknown" | "stale" | "equivalent" | "conflict" | "ahead"
-```
+**A fold manifest** lists applied spends as `spend` and rejected spends as
+`void`, and may point at the previous manifest. A voided spend never applies
+again, even against a later, larger balance. A manifest with no references, or
+one that lists the same id twice, is rejected. The snapshot references its
+manifest with `["e", "<manifest-id>", relay, "fold"]`.
 
-The counter lives in a `["revision", "<n>"]` **tag**, not in `content`. This is
-the one place 31633 diverges from 31634's shape, and the kinds' own semantics
-force it: a placement's `content` is its authoritative state document, while an
-inventory's state is in its tags and its `content` is optional metadata that is
-an empty string by default. Writing a counter there would mean inventing a JSON
-object where publishers legitimately have none, and clobbering whatever a peer
-stored. The comparison semantics are unchanged from 31634.
+**Chain resolution** (`resolveGameInventoryFoldChain`) walks from the
+snapshot's fold reference through `previous` links, stops on a cycle, and
+returns `unresolved` when a manifest is missing, invalid, scoped to another
+inventory, or (when spend events are supplied) references a spend that is
+invalid or belongs to another inventory.
+`resolveGameInventoryState` combines resolution and derivation and produces no
+balance at all when the chain is unresolved. It does not guess in either
+direction. A snapshot with no fold reference resolves trivially and every valid
+spend against it is pending.
 
-**What it gives you:** two states with valid, different revisions can be
-ordered, and two states claiming the same revision are reported as `conflict`
-unless there is hard evidence — the same event id, or byte-identical tags — that
-they are the same state.
+**Settlement is by id, never by time.** `created_at` orders pending spends. It
+never decides whether a spend is settled, because a relay can deliver an older
+spend after a newer snapshot. `buildGameInventorySpendFilter` has no `since` for
+the same reason.
 
-**What it does not give you:** it is not a lock and not compare-and-swap. Nostr
-has neither. It does not prevent a concurrent write, does not replace
-addressable-event resolution, cannot detect anything against a peer that omits
-the tag, and does not define a merge. Resolving a `conflict` is your decision.
+**Publish the manifest first**, wait for a relay to accept it, then publish the
+snapshot that references it. An orphan manifest settles nothing. A snapshot that
+points at a manifest nobody can fetch is unresolved for every reader.
 
-`created_at` is never consulted to break an equal-revision tie — timestamps are
-publisher-controlled — and tags are never sorted or normalized before comparison.
-
-A malformed `revision` is ignored with an `invalid-revision` warning in
-permissive mode and rejects only in strict mode. Refusing to parse a player's
-whole inventory because a peer wrote a bad advisory counter would make every
-item they own vanish from every UI; an ignored revision degrades to `unknown`,
-which is the designed safe fallback.
-
-### Kind 1416 / 1417 — spends and fold manifests
-
-```ts
-// kind:1416 Game Inventory Spend
-parseGameInventorySpend(event, options?): GameInventorySpend | null
-parseGameInventorySpendResult(event, options?): ParseResult<GameInventorySpend>
-validateGameInventorySpend(event, options?): SpendValidationResult
-buildGameInventorySpendEvent(input): UnsignedEventTemplate<1416>
-buildGameInventorySpendFilter(options?): GameInventorySpendFilter
-compareGameInventorySpendOrder(a, b): number          // (created_at asc, id asc)
-sortGameInventorySpends(spends): T[]
-SPEND_ITEM_MARKER // "item"   SPEND_QUANTITY_TAG // "quantity"   INVENTORY_MARKER // "inventory"
-
-// Derivation (pure)
-deriveGameInventoryState({ inventory, spends, foldedSpendIds?, voidedSpendIds? }, options?)
-  : GameInventoryDerivedState
-
-// kind:1417 Game Inventory Fold Manifest
-parseGameInventoryFold(event, options?): GameInventoryFold | null
-parseGameInventoryFoldResult(event, options?): ParseResult<GameInventoryFold>
-validateGameInventoryFold(event, options?): FoldValidationResult
-buildGameInventoryFoldEvent(input): UnsignedEventTemplate<1417>
-toBuildGameInventoryFoldInput(state): BuildGameInventoryFoldInput | null
-buildGameInventoryFoldFilter(options?): GameInventoryFoldFilter
-FOLD_PREVIOUS_MARKER // "previous"   FOLD_SPEND_MARKER // "spend"   FOLD_VOID_MARKER // "void"
-
-// Chain resolution and the reader's entry point (pure)
-resolveGameInventoryFoldChain({ inventoryAddress, headFoldId?, folds, spends? }, options?)
-  : GameInventoryFoldResolution
-resolveGameInventoryState({ inventory, folds, spends }, options?)
-  : { status: "resolved"; chain; state } | { status: "unresolved"; chain }
-```
-
-The protocol is specified in
-[`docs/1416-1417-game-inventory-spend.md`](./docs/1416-1417-game-inventory-spend.md).
-The short version:
-
-#### Why spends exist
-
-`kind:31633` is addressable: a publish replaces the whole event. If the farm
-game and the island game both replace `31633:<player>:farm:main`, the last
-write wins and the other is destroyed. Spends let any application **debit** an
-inventory without replacing it:
-
-```text
-island game  ->  player signs kind:1416 "spend 1 strawberry from 31633:<player>:farm:main"
-readers      ->  effective = snapshot − applicable spends not yet folded
-farm game    ->  next time it replaces the snapshot anyway, it folds the outstanding
-                 spends into the new quantities, publishes a kind:1417 listing
-                 exactly which spend ids it incorporated, and references it
-```
-
-#### Spend shape and authority
-
-```json
-["a", "31633:<owner>:<inventory-d>", "<relay>", "inventory"]
-["a", "31632:<issuer>:<item-d>", "<relay>", "item"]
-["quantity", "<positive-integer>"]
-```
-
-Exactly one of each. Full addresses always: an inventory or an item is never
-identified by `d` alone. **`event.pubkey` must equal the owner in the inventory
-address**, or the event is not a spend — it is rejected by the parser and can
-never affect a balance, whatever `client` tag it carries. Optional `purpose`,
-`client`, `nonce` and `alt` tags are preserved and never consulted for
-accounting. One item per spend; the event id is the spend's identity, so a
-retry republishes the same signed event rather than signing a new one.
-
-#### Deterministic derivation
-
-Pending spends are walked in `(created_at asc, id asc)` order. A spend whose
-quantity is at most the current balance of its item is **applied**; anything
-else is **rejected** in full — never partial, never clamped, never deferred.
-Relay duplicates are removed by id first. Every reader with the same snapshot,
-chain and spend set derives the same result, whatever order relays delivered
-the events in.
-
-`deriveGameInventoryState` returns the effective inventory as a regular
-`GameInventory` — so `addInventoryItemQuantity`, `toBuildGameInventoryInput`
-and friends work on it unchanged — plus every candidate's status: `applied`,
-`rejected`, `folded`, `voided`, `ignored` (valid, other inventory) or `invalid`.
-
-#### Fold manifests and the chain
-
-```json
-["a", "31633:<owner>:<inventory-d>", "<relay>", "inventory"]
-["e", "<previous-manifest-id>", "<relay>", "previous"]
-["e", "<spend-id>", "<relay>", "spend"]
-["e", "<spend-id>", "<relay>", "void"]
-```
-
-`spend` references are applied spends now inside the snapshot's numbers;
-`void` references are rejected spends the owner has settled as permanently not
-applicable (so an overdraw cannot resurface against a later, larger balance).
-A manifest that lists the same id twice, or lists nothing, is rejected. The
-snapshot references its manifest with `["e", "<id>", "<relay>", "fold"]`, and:
-
-```text
-effective = snapshot − applicable spends not reachable through the fold chain
-```
-
-`resolveGameInventoryFoldChain` walks the chain head-first, stops on a cycle,
-and returns `unresolved` when a manifest is missing, invalid, scoped to another
-inventory, or (when spend events are supplied) references an invalid or
-foreign spend. `resolveGameInventoryState` combines chain resolution and
-derivation and **produces no state when the chain is unresolved**: the library
-does not guess whether an unknown manifest folded a spend, in either
-direction.
-
-#### No timestamp watermark
-
-A spend's `created_at` decides its **order**, never whether it is **settled**.
-A spend older than the snapshot that has not been folded is still pending,
-because relays deliver late. Explicit ids are the only settlement mechanism,
-and `buildGameInventorySpendFilter` deliberately has no `since`.
-
-#### Publication order
-
-Publish the manifest, wait for a relay to accept it, then publish the snapshot
-that references it. An orphan manifest is harmless (it settles nothing); a
-snapshot pointing at a manifest nobody can fetch is not (readers cannot prove
-what it incorporated).
-
-#### The owner's cycle
+The owner's write cycle:
 
 ```ts
 const r = resolveGameInventoryState({ inventory: base, folds, spends });
 if (r.status !== "resolved") {
-  /* fetch r.chain.problems' manifests, retry */
+  // fetch the manifests named in r.chain.problems and retry
 }
 const next = addInventoryItemQuantity(r.state.inventory, harvested, 2);
 
 const foldInput = toBuildGameInventoryFoldInput(r.state); // null if nothing to settle
 const manifest = foldInput && buildGameInventoryFoldEvent(foldInput);
-// sign + publish manifest, wait for acceptance …
+// sign and publish the manifest, wait for acceptance, note its id …
 
 const unsigned = buildGameInventoryEvent({
   ...toBuildGameInventoryInput(next), // carries the previous fold reference
@@ -490,674 +241,124 @@ const unsigned = buildGameInventoryEvent({
 });
 ```
 
-#### What it does not solve
-
-The spend model removes the cross-application lost update. It is not
-compare-and-swap for `kind:31633`: two instances of the **owner** that both
-replace from the same base still race, exactly as before, and `revision` is
-still the only (advisory) way to notice. No reader double-debits in that case;
-the losing instance's own mutation is what is lost. `revision` is unrelated to
-folds and is never a spend checkpoint. Grants, transfers, reservations,
-conversions and crafting are out of scope, and nothing here decides whether an
-issuer or item is trusted.
-
-### Quantity helpers
-
-```ts
-parseInventoryQuantity(raw): number | null      // positive integer strings only
-getInventoryItemQuantity(inventory, itemAddress): number
-setInventoryItemQuantity(inventory, itemAddress, quantity, relay?): GameInventory
-addInventoryItemQuantity(inventory, itemAddress, amount, relay?): GameInventory
-removeInventoryItemQuantity(inventory, itemAddress, amount): GameInventory
-removeInventoryItemQuantityChecked(inventory, itemAddress, amount): GameInventoryRemovalResult
-```
-
-All inventory helpers are **immutable**: they return a new `GameInventory` and
-never mutate the input.
-
-`removeInventoryItemQuantity` clamps its _result_ at zero, so removing 5 units of
-an item the player holds 2 of succeeds silently. That is right for "take up to
-N" and is unchanged. For a spend, where an over-spend must not look like a
-success, use `removeInventoryItemQuantityChecked`, which returns
-`{ ok: false, reason: "insufficient-quantity", available, requested }` instead.
-
-The division is the one the package uses throughout: a caller bug (a malformed
-address, a non-integer amount) throws; a data condition (not enough of the item)
-is a structured result.
-
-### Kind 31634 — Game Item Placement
-
-```ts
-parseGameItemPlacement(event, options?): GameItemPlacement | null
-parseGameItemPlacementResult(event, options?): ParseResult<GameItemPlacement>
-buildGameItemPlacementEvent(input): UnsignedEventTemplate<31634>
-toBuildGameItemPlacementInput(placement): BuildGameItemPlacementInput
-validateGameItemPlacement(event, options?): ItemPlacementValidationResult
-```
-
-#### Placement identity: `d` is not the target
-
-A placement event is addressable as `31634:<author-pubkey>:<d-tag>`. The `d`
-value identifies a **placement-state document**, which is a separate thing from
-what the placement points at. Never assume `d` equals a character id, room id,
-map id or target id — a publisher may embed one, but that is a local
-convention.
-
-```ts
-buildGameItemPlacementAddress("pk", "blobbi-island:character:char-1:equipment");
-// "31634:pk:blobbi-island:character:char-1:equipment"
-```
-
-Colons inside `d` round-trip correctly: parsing splits only on the first two.
-
-#### Content authority (31634)
-
-`content` MUST be a JSON object and is authoritative:
-
-```jsonc
-{
-  "version": 1, // optional, non-negative integer
-  "revision": 4, // optional, non-negative integer
-  "target": {/* … */}, // optional, authoritative
-  "reference": {/* … */}, // optional coordinate system
-  "placements": [/* … */], // may be empty
-}
-```
-
-This is a deliberate difference from 31632/31633, where `content` is optional
-metadata. An empty `content` string, a JSON array, `null`, a string or a number
-is rejected — there is no placement document to read.
-
-The `a` tags are a **derived index** that exists so relays can answer `#a`
-queries. An `a` tag with no matching entry in `content.placements` is not a
-placement.
-
-#### Target union
-
-```ts
-type GameItemPlacementTarget =
-  | { type: "address"; address: string; relay?: string; [key: string]: unknown }
-  | { type: "internal"; id: string; [key: string]: unknown }
-  | { type: string; [key: string]: unknown }; // unknown, preserved verbatim
-
-isAddressPlacementTarget(target): boolean
-isInternalPlacementTarget(target): boolean
-```
-
-- An `address` target must carry a valid full `<kind>:<pubkey>:<d>` address.
-  Which kinds are acceptable targets is your decision, not the library's.
-- An `internal` target must carry a non-empty `id`.
-- A target with an unknown `type` is **preserved, not rejected**; no canonical
-  tag can be derived from it.
-- A missing target is valid and only warns.
-
-Canonical target tags, at most one per event:
-
-```json
-["a", "<addressable-target>", "<relay-url>", "target"]
-["target", "<internal-target-id>"]
-```
-
-When `content.target` is present it wins; disagreeing tags produce a
-`target-mismatch` warning and are still exposed as `placement.targetTags`
-metadata. When it is absent, target tags are the only (unauthenticated) hint
-and are left alone.
-
-#### Item-derived tags and marker filtering
-
-Every unique `placements[].item` address yields exactly one tag, in
-first-placement order:
-
-```json
-["a", "31632:<issuer>:<item-d>", "<relay-url>", "item"]
-```
-
-**Relays filter `#a` by value, not by marker.** A `#a` query also returns events
-that reference the same address as their target or through an unrelated `a`
-relationship, so you must narrow locally:
-
-```ts
-const filter = buildGameItemPlacementFilter({ addresses: [hatAddress] });
-// -> { kinds: [31634], "#a": [hatAddress] }
-const mine = filterEventsByPlacementItemAddress(events, hatAddress);
-
-isPlacementItemTag(tag): boolean
-isPlacementTargetTag(tag): boolean
-getPlacementItemTags(event | tags): GameItemPlacementItemTag[]
-getPlacementTargetTags(event | tags): GameItemPlacementTargetTag[]
-```
-
-#### 2D and 3D references
-
-```jsonc
-{ "space": "2d", "unit": "percent",    "origin": "top-left", "width": 100, "height": 100 }
-{ "space": "2d", "unit": "normalized", "origin": "center",   "width": 1,   "height": 1 }
-{ "space": "3d", "unit": "meters",     "origin": "center", "handedness": "right-handed", "upAxis": "y" }
-```
-
-```ts
-isGameItemPlacement2DReference(reference): boolean
-isGameItemPlacement3DReference(reference): boolean
-```
-
-A recognized `2d` reference requires `unit`, `origin` and finite `width` /
-`height`; a recognized `3d` reference requires `unit` and `origin`, and makes
-`position.z` mandatory on every entry. Unknown `space` values — and unknown
-units, origins, handedness and up axes — are preserved and never validated
-away. **Coordinates are never normalized and no rendering defaults are written
-into the parsed document.**
-
-#### Transforms
-
-All transform numbers must be finite; numeric strings are never coerced.
-
-| Field      | Rule                                                                                                                                          |
-| ---------- | --------------------------------------------------------------------------------------------------------------------------------------------- |
-| `position` | `x`, `y` required; `z` required under a 3D reference. Never clamped.                                                                          |
-| `rotation` | `euler` (`unit` required, `x`/`y`/`z` optional — z-only is valid for 2D) or `quaternion` (`x`,`y`,`z`,`w` required). Unknown types preserved. |
-| `scale`    | `x`, `y` required, `z` optional. Zero and negative are allowed.                                                                               |
-| `flip`     | `x`, `y` required booleans.                                                                                                                   |
-| `layer`    | any finite number, not required to be an integer.                                                                                             |
-
-A zero-length quaternion is rejected. Quaternions are never normalized, and unit
-length is not required.
-
-```ts
-isGameItemPlacementEulerRotation(rotation): boolean
-isGameItemPlacementQuaternionRotation(rotation): boolean
-```
-
-#### equip vs place
-
-```ts
-GAME_ITEM_PLACEMENT_MODES; // ["equip", "place"]
-isGameItemPlacementMode(value): boolean
-```
-
-`equip` attaches an item to a `slot` on the target; `place` positions it inside
-the target. Unknown modes stay valid and produce an `unknown-placement-mode`
-warning, because `mode` decides how an entry is interpreted. Unknown slots are
-valid and silent.
-
-#### Query and mutation helpers
-
-```ts
-getPlacementItems(placement): string[]                 // unique item addresses
-getPlacementById(placement, id): GameItemPlacementEntry | undefined
-getPlacementsByItem(placement, itemAddress): GameItemPlacementEntry[]
-getPlacementsBySlot(placement, slot): GameItemPlacementEntry[]   // ALL modes
-getFirstEquippedPlacementBySlot(placement, slot): GameItemPlacementEntry | undefined
-getLastEquippedPlacementBySlot(placement, slot): GameItemPlacementEntry | undefined
-
-addPlacement(placement, entry): GameItemPlacement
-replacePlacement(placement, entry): GameItemPlacement
-removePlacement(placement, id): GameItemPlacement
-setEquippedPlacementForSlot(placement, slot, entry): GameItemPlacement
-removeEquippedPlacementFromSlot(placement, slot): GameItemPlacement
-```
-
-Slot reads are explicit by design: there is no ambiguous
-`getEquippedPlacementBySlot`. `getPlacementsBySlot` returns **every** entry for
-the slot regardless of mode; the `First`/`Last` helpers return only
-`mode: "equip"` entries.
-
-**Duplicate policy.** Duplicate entry ids and duplicate equipped slots never
-invalidate a parsed document; they warn. Then:
-
-| Helper                            | Behavior with duplicates                                                                                                     |
-| --------------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| `addPlacement`                    | throws if the id already exists                                                                                              |
-| `replacePlacement`                | replaces the **first** match, leaves later ones alone                                                                        |
-| `removePlacement`                 | removes **every** entry with that id                                                                                         |
-| `setEquippedPlacementForSlot`     | deterministic **last-wins**: removes every conflicting `equip` entry for the slot, inserts one at the first removed position |
-| `removeEquippedPlacementFromSlot` | removes every `equip` entry for the slot, keeps other modes                                                                  |
-
-`setEquippedPlacementForSlot` takes a complete replacement entry — it generates
-nothing on your behalf. `mode` must be `"equip"`, and `slot` must match or be
-omitted.
-
-All mutations are immutable at every depth (entries are deep-copied) and
-preserve unrelated entries, unknown entry fields, and top-level
-`target`/`reference`/`version`/`revision`/unknown content. They update
-`placements` and the derived `itemAddresses`, and deliberately carry
-`content`, `contentJson`, `itemTags`, `targetTags` and `event` through
-unchanged: those describe the _source event_. Rebuild to regenerate them.
-
-#### Unknown-data preservation and round-tripping
-
-Preservation works on three levels:
-
-1. **Index signatures** on every parsed structure (target, reference, entries,
-   transforms), so unknown fields are typed as `unknown` rather than dropped.
-2. **`placement.content`** (the raw string) and **`placement.contentJson`** (the
-   full parsed object, _including_ entries the parser rejected) — the escape
-   hatch for repair workflows.
-3. **`toBuildGameItemPlacementInput(placement)`**, which feeds unknown top-level
-   content fields back through `contentExtra` and the original tags through
-   `preserveTags`.
-
-```ts
-const next = setEquippedPlacementForSlot(placement, "head", entry);
-const unsigned = buildGameItemPlacementEvent({
-  ...toBuildGameItemPlacementInput(next),
-  revision: (next.revision ?? 0) + 1,
-});
-```
-
-Only _valid_ entries round-trip; entries the parser rejected are not
-republished, and remain on `contentJson` for inspection.
-
-#### Builder managed tags
-
-The builder owns `d`, `context`, `t`, `alt`, the canonical target relationship,
-and the derived `a`+`item` tags. Emitted order:
-
-```text
-d → context* → t* → target → item* → alt → preserved tags → extraTags
-```
-
-- `preserveTags` (typically `placement.event.tags`) is carried over with **stale
-  managed tags stripped**, so rebuilding never duplicates or strands them.
-  Unrelated tags — including `a` tags with no marker or a different marker —
-  survive in their original relative order.
-- Target tags are stripped only when the input `target` is a _known_ type, since
-  only then can a canonical replacement be derived. With no target, or an
-  unknown target type, preserved target tags are kept as-is.
-- `extraTags` **throws** on a conflict with a managed tag, matching the other
-  builders in this package.
-- Identical input produces byte-identical output. This is ordinary
-  `JSON.stringify` over a deterministically constructed object — no
-  canonical-JSON dependency is introduced.
-
-#### Revision semantics
-
-```ts
-compareGameItemPlacementRevisions(current, incoming):
-  "unknown" | "stale" | "equivalent" | "conflict" | "ahead"
-```
-
-`revision` is **advisory** and does not replace Nostr addressable-event
-resolution. Two states sharing a revision are only `equivalent` on hard
-evidence: the same event id, or byte-identical original `content`.
-
-`created_at` is deliberately never consulted — wall-clock timestamps are
-publisher-controlled, so using them to break a tie would silently pick a winner
-where the honest answer is `conflict`. JSON is never re-canonicalized to
-manufacture a match. Resolving a conflict is your decision.
-
-#### Authorization boundary
-
-The library exposes target and item relationships. It never decides whether:
-
-- the author owns or may modify the target;
-- the author is delegated;
-- the item is in any inventory;
-- the issuer is trusted;
-- the item is valid for the slot;
-- the placement should render.
-
-Equipping does **not** consume inventory quantity, and unequipping does **not**
-change it. Possession is `kind:31633`'s concern. A typical application policy
-gates on author permission, inventory quantity > 0, trusted issuer, and
-slot/form compatibility before rendering — all of it outside this package.
-
-## Parsing behavior: modes and results
-
-Every parser accepts a `mode`:
-
-- **`permissive`** (default) — follows the specs' "SHOULD tolerate" rules.
-  Unknown tags are kept, invalid item tags are ignored, invalid JSON `content`
-  does not block tag parsing, duplicate inventory items resolve using the
-  recommended default (`last` valid quantity).
-- **`strict`** — rejects the event where the specs allow rejection: invalid
-  JSON `content`, duplicate item references (see below), and — for `31634` — any
-  malformed placement entry or malformed reference.
-
-"MUST reject" conditions reject the event in **both** modes: wrong kind,
-missing/empty `d`, missing required `31632` tags, and for `31634` a `content`
-that is not a JSON object, a non-array `placements`, a malformed known `target`,
-or an invalid `version`/`revision`.
-
-For `31634` specifically:
-
-- a malformed **entry** is dropped with an `invalid-placement-entry` warning in
-  permissive mode and rejects the event in strict mode; the original entry stays
-  available on `contentJson`;
-- **tag/content mismatches are warnings in both modes** — the tags are a derived
-  index, so the right response is to republish repaired tags, not to discard
-  state;
-- unknown fields and unknown enum-like values are never rejected in either mode,
-  simply because this version does not know them.
-
-Parsers come in two flavors so failures are never silently hidden:
-
-- `parseX(...) => X | null` — convenience.
-- `parseXResult(...) => ParseResult<X>` — structured result exposing:
-  - `ok: false` + `error` for a **rejected event**;
-  - `ok: true` + `value` for a valid event, plus `warnings[]` describing
-    **valid events with invalid tags that were ignored** and other recoverable
-    issues (e.g. `invalid-quantity`, `malformed-address`,
-    `wrong-referenced-kind`, `invalid-json-content`, `invalid-image-tag`,
-    `missing-primary-image`, `multiple-primary-images`, `duplicate-item`).
-
-Placement warnings are: `invalid-placement-entry`, `duplicate-placement-id`,
-`duplicate-equip-slot`, `unknown-placement-mode`, `invalid-reference`,
-`missing-reference`, `missing-target`, `target-mismatch`,
-`duplicate-target-tag`, `missing-item-tag`, `orphaned-item-tag`,
-`duplicate-item-tag`. Every one has a clear consumer action, and a canonical
-document produces none: `missing-reference` fires only when an entry actually
-carries a `position`, and unknown reference spaces and rotation types are
-preserved silently.
-
-Warnings also carry SHOULD-level authoring guidance (e.g. the primary-image
-warnings above). They never affect the parsed value and never reject the event,
-including in strict mode.
-
-### Content JSON
-
-For both kinds, `content` is preserved verbatim on the parsed object
-(`.content`). If it is non-empty valid JSON it is also exposed as
-`.contentJson`. Invalid JSON in permissive mode yields a warning, not a
-rejection. JSON is only required if you opt in via `requireJsonContent` (or use
-`strict` mode). Builders accept either a preserialized string or any
-JSON-serializable value for `content`.
-
-## Duplicate inventory items
-
-The 31633 spec allows three strategies for duplicate `a` tag addresses. This
-library implements all three explicitly via `duplicateStrategy`:
-
-| Strategy | Behavior                     | Default in      |
-| -------- | ---------------------------- | --------------- |
-| `last`   | keep the last valid quantity | permissive mode |
-| `sum`    | sum all valid quantities     | (opt-in)        |
-| `strict` | reject the inventory         | strict mode     |
-
-`last` is the spec's recommended default, so it is the default in permissive
-parsing and in `buildGameInventoryEvent`.
-
-## Builders
-
-Builders:
-
-- validate input before generating anything (throw on empty `id`/`name`/`type`,
-  invalid item addresses, malformed transforms, or invalid quantities — nothing
-  is floored, clamped or silently dropped);
-- produce unsigned templates (`{ kind, content, tags }`), never `id`/`sig`;
-- **omit zero-quantity items** (31633), since `0` means "not held";
-- emit tags in a **stable, deterministic order**, so identical input produces
-  identical output;
-- never duplicate the tags they manage; `extraTags` are appended verbatim and
-  **throw** on a conflict with a managed tag;
-- never sign, never publish, never fetch.
-
-## Example
-
-```ts
-import {
-  buildGameItemDefinitionEvent,
-  buildGameItemAddress,
-  buildGameInventoryEvent,
-  parseGameInventory,
-  addInventoryItemQuantity,
-} from "@nostr-games/inventory";
-
-// Define an item
-const carrot = buildGameItemDefinitionEvent({
-  id: "blobbi:food:carrot",
-  name: "Carrot",
-  type: "consumable",
-  category: "food",
-  topics: ["edible"],
-  content: { description: "A crunchy carrot." },
-});
-
-// Start from an empty inventory event, add 3 carrots, rebuild.
-const carrotAddr = buildGameItemAddress(
-  "<issuer-pubkey>",
-  "blobbi:food:carrot",
-);
-const empty = buildGameInventoryEvent({ id: "game:blobbi" });
-const inv = parseGameInventory({
-  ...empty,
-  id: "",
-  pubkey: "<owner>",
-  created_at: 0,
-  sig: "",
-})!;
-const updated = addInventoryItemQuantity(inv, carrotAddr, 3);
-const nextEvent = buildGameInventoryEvent({
-  id: updated.id,
-  items: updated.items,
-});
-```
-
-### Equipping an item (kind 31634)
-
-Generic, not tied to any particular game:
-
-```ts
-import {
-  buildGameItemAddress,
-  buildGameItemPlacementEvent,
-  parseGameItemPlacementResult,
-  setEquippedPlacementForSlot,
-  toBuildGameItemPlacementInput,
-  getLastEquippedPlacementBySlot,
-} from "@nostr-games/inventory";
-
-const hat = buildGameItemAddress("<issuer>", "cosmetic:wizard_hat");
-
-// 1. Publish an initial equipment document for a character.
-const first = buildGameItemPlacementEvent({
-  id: "mygame:character:char-1:equipment",
-  revision: 1,
-  target: { type: "address", address: "31124:<owner>:char-1" },
-  placements: [{ id: "head", item: hat, mode: "equip", slot: "head" }],
-  contexts: ["game:mygame"],
-  alt: "Character equipment",
-});
-// -> { kind: 31634, content: "{...}", tags: [["d", …], ["context", …],
-//      ["a", "31124:<owner>:char-1", "", "target"], ["a", hat, "", "item"],
-//      ["alt", …]] }
-// Sign and publish `first` with your own signer/relay client.
-
-// 2. Later: read the newest event back and swap what is in the slot.
-const parsed = parseGameItemPlacementResult(latestEventFromRelay);
-if (!parsed.ok) throw new Error(parsed.error);
-const placement = parsed.value;
-console.log(parsed.warnings); // e.g. stale item tags to repair
-
-const scarf = buildGameItemAddress("<issuer>", "cosmetic:scarf");
-const next = setEquippedPlacementForSlot(placement, "head", {
-  id: "head",
-  item: scarf,
-  mode: "equip",
-  slot: "head",
-});
-
-getLastEquippedPlacementBySlot(next, "head")?.item; // scarf
-
-// 3. Rebuild the complete replacement state, preserving unknown data.
-const updatedEvent = buildGameItemPlacementEvent({
-  ...toBuildGameItemPlacementInput(next),
-  revision: (next.revision ?? 0) + 1,
-});
-```
-
-Note what the library did **not** do: it did not check that the author may
-modify `char-1`, that the scarf is in any inventory, or that `head` is a legal
-slot for it — and equipping changed no inventory quantity. Those gates are your
-application's.
-
-## Ambiguities found in the specifications
-
-These were resolved explicitly rather than silently:
-
-1. **`d` values contain colons.** The recommended `d` format
-   `namespace:category:slug` means full addresses have more than three
-   colon-separated parts. Address parsing therefore treats everything after the
-   second colon as the identifier.
-2. **Pubkey format.** The spec examples use non-hex placeholders. Address
-   parsing accepts any non-empty pubkey by default; strict hex validation is
-   opt-in (`requireHexPubkey`).
-3. **`based_on` marker vs. quantity slot.** In `31632`, an `a` tag's index-3
-   slot is the `based_on` marker; in `31633` the same slot is the quantity.
-   These are handled per-kind and never conflated.
-4. **Ignore vs. reject.** For `31633`, malformed/invalid item references are
-   _ignored_ (parse still succeeds) while missing/empty `d` or wrong `kind`
-   _rejects_ the whole event. These are surfaced as warnings vs. errors.
-5. **Duplicate items.** Default `last`, with `sum` and `strict` available, per
-   the spec's three allowed strategies.
-6. **Invalid JSON `content`.** Only rejected when JSON is required
-   (`requireJsonContent` / strict mode); otherwise a warning.
-7. **Primary image when the `image` tag repeats.** The spec says an item
-   "SHOULD" have exactly one unmarked `image` tag but does not require it.
-   Parsing therefore picks the first unmarked image, falls back to the first
-   image when all of them are marked, and treats a blank marker slot as no
-   marker — and reports the deviation as a warning rather than an error, so
-   authoring tools can flag it without any client rejecting the item.
-
-### kind:31633 decisions (this release)
-
-8. **`revision` is a tag, not a content field.** kind:31634 carries its counter
-   in `content` because content is its authoritative state. An inventory's state
-   is its tags and its `content` is optional metadata that is an empty string by
-   default, so a counter there would mean inventing a JSON object publishers do
-   not have and clobbering whatever a peer stored. The comparison semantics are
-   unchanged from 31634.
-9. **A malformed `revision` warns rather than rejects.** kind:31634 rejects an
-   invalid counter. For an inventory that would make every item a player owns
-   vanish from every client because a peer wrote a bad advisory value, so
-   permissive mode ignores it with an `invalid-revision` warning and degrades to
-   `unknown`; strict mode still rejects.
-10. **Equal-revision evidence is the tags, not the content.** 31634 compares the
-    raw `content` string because that is its state. 31633 compares the tag list
-    element-by-element, exactly as received, for the same reason. Nothing is
-    sorted or normalized, so a differing tag order is honestly a `conflict`.
-11. **The `created_at` tie-break follows NIP-01.** The spec previously said
-    clients "MAY choose either one"; it now says lowest event id, matching
-    NIP-01, because leaving it open invited two clients to disagree about the
-    current inventory in the one case where agreement matters most.
-
-### kind:1416 / kind:1417 decisions
-
-20. **Spend, not "operation".** `kind:1416` is a debit only. A generic
-    operation kind with a `type` field would make every reader understand every
-    future type before trusting any balance; grants and the rest will be their
-    own kinds.
-21. **One item per spend.** One event id is one debit identity, applicability
-    is one comparison, ordering is total, and partial application cannot arise.
-22. **Author = inventory owner is structural.** A spend by anyone else is not a
-    spend; it is rejected at parse time, so no derivation path can ever see it.
-    A `client` tag is informational and never an authorisation.
-23. **`(created_at, id)` is the order, and nothing else is.** It is NIP-01's own
-    tie-break; ids are compared as plain strings.
-24. **Overdraw rejects in full, and `void` makes it final.** No partial
-    application and no clamping. Before settlement a rejection is a function of
-    the inputs; the owner's manifest voids it, after which it never applies
-    against any later balance. Without `void`, a rejected spend would silently
-    apply the moment the owner's next snapshot held enough.
-25. **Explicit ids, no watermark.** Settlement is by spend id reachable through
-    the chain. `created_at` never decides whether a spend is folded, because a
-    relay can deliver an older spend after a newer snapshot.
-26. **Duplicate references in a manifest reject.** Deduplicating would let an
-    ambiguous manifest change balances; ambiguity here is an error.
-27. **A zero-reference manifest is invalid.** It settles nothing, and the next
-    snapshot simply keeps the previous reference.
-28. **Unresolved is a state, not a number.** When the chain cannot be walked,
-    `resolveGameInventoryState` returns no state at all. Assuming unknown spends
-    folded hides debits; assuming them pending double-debits the owner.
-29. **No base-snapshot reference in the manifest.** Relays keep only the newest
-    `kind:31633`, so a base reference could never be verified by a reader; the
-    inventory address plus the `previous` chain already determines the settled
-    set; and the owner-side "has the head moved" check is what `revision` is
-    for.
-30. **Manifest first, snapshot second.** An orphan manifest is harmless; a
-    snapshot referencing an unretrievable manifest is not.
-31. **The `fold` reference is builder-managed on kind:31633.** Like `grant`, it
-    is stripped from `preserveTags`, regenerated from `fold`, and rejected in
-    `extraTags`, so a rewrite never strands a stale duplicate and never
-    silently un-folds a chain.
-
-### kind:31634 decisions
-
-12. **`content` is required and authoritative.** Unlike the other two kinds, a
-    placement carries its state in `content`, so an empty/non-object `content` is
-    rejected instead of tolerated. There is deliberately no `requireJsonContent`
-    option for 31634.
-13. **Unknown discriminators are preserved, not rejected.** A malformed _known_
-    target rejects the event, but an unknown `target.type`, an unknown
-    `reference.space` and an unknown `rotation.type` are kept verbatim. Rejecting
-    them would make this version reject documents written against a newer one.
-14. **Absent vs. wrong `placements`.** An absent `placements` is read as an empty
-    list with a warning; a present non-array `placements` rejects the event. Both
-    spellings of "nothing is placed" are understood, but a structurally wrong
-    value is never guessed at.
-15. **`version` and `revision` reject when invalid.** They are advisory, but a
-    present-and-invalid counter (including a numeric _string_) is a content
-    error, not something to silently coerce or ignore.
-16. **Tag/content mismatch is a warning, never a rejection** — in strict mode
-    too. The tags are a derived index; the fix is to republish repaired tags.
-17. **`z` is required only under a recognized 3D reference.** Otherwise
-    `position.z` is optional, so the same entry shape serves 2D and 3D.
-18. **Slot reads are explicit.** No `getEquippedPlacementBySlot`; the caller asks
-    for first, last, or all. Slot _writes_ are deterministic last-wins.
-19. **Mutations do not refresh source-event fields.** `content`, `contentJson`,
-    `itemTags`, `targetTags` and `event` still describe the event the placement
-    was parsed from; rebuilding regenerates everything from `placements`.
-
-## Project structure
-
-```
-src/
-  index.ts                       # public barrel export
-  nostr/event.ts                 # NostrEvent, UnsignedEventTemplate
-  common/
-    constants.ts                 # KIND_* constants
-    address.ts                   # addressable address parse/build
-    tags.ts                      # getDTag, getTagValue(s)
-    json.ts                      # content JSON parse/serialize
-    result.ts                    # ParseMode / ParseResult / warnings
-    strings.ts                   # isBlank, uniqueNonBlank
-    numbers.ts                   # finite / non-negative-integer checks (internal)
-    objects.ts                   # isPlainObject, deep JSON clone (internal)
-  kinds/
-    game-item-definition/        # kind 31632
-      { types, images, address, filter, validate, parse, build, index }
-    game-inventory/              # kind 31633
-      { types, address, quantity, revision, filter, validate, parse, build,
-        helpers, index }
-    game-item-placement/         # kind 31634
-      { types, guards, address, tags, content, validate, parse, build,
-        helpers, revision, index }
-    game-inventory-spend/        # kind 1416
-      { constants, types, validate, parse, build, order, filter, derive, index }
-    game-inventory-fold/         # kind 1417
-      { constants, types, validate, parse, build, filter, chain, state, index }
-test/                            # vitest suites
-docs/                            # the protocol drafts
-```
-
-## Scripts
+Full rules, worked examples and the reasoning behind each decision are in
+[`docs/1416-1417-game-inventory-spend.md`](./docs/1416-1417-game-inventory-spend.md).
+
+## Trust and concurrency boundaries
+
+Things the library checks:
+
+- A spend or manifest is accepted only if `event.pubkey` equals the owner in
+  the inventory address it references. This is a pubkey comparison. The library
+  does not verify signatures; that is your relay client's or signer's job.
+- Structural validity of every event, as described above.
+- Revision ordering. `compareGameInventoryRevisions` and
+  `compareGameItemPlacementRevisions` return `unknown`, `stale`, `equivalent`,
+  `conflict` or `ahead`. Two states with the same revision are `equivalent`
+  only on hard evidence: the same event id, or byte-identical tags (31633) or
+  byte-identical `content` (31634). `created_at` is never used to break a tie,
+  since timestamps are publisher-controlled.
+
+Things the library does not do, and cannot do from the events alone:
+
+- It does not decide whether an item issuer is trusted, whether an item is
+  really in an inventory, whether an author may modify a placement target, or
+  whether anything should render. Those are application policy.
+- Revisions are advisory. They are not a lock and not compare-and-swap. Nostr
+  has neither. Two instances of the owner that both rewrite from the same base
+  still race; `revision` lets a later reader notice, nothing here prevents it.
+- "One replacement writer per inventory context" is a coordination convention
+  between honest applications. The protocol cannot stop a player, or a client
+  holding the player's key, from replacing their own inventory or voiding their
+  own spends.
+- Absence of an event from a relay is not evidence it does not exist. A
+  derived balance is correct for the events you supplied, not globally final.
+- Equipping an item in a `31634` event does not change any `31633` quantity.
+- Grants are not defined. `31633` can carry `e` tags marked `grant` and the
+  library preserves them, but no grant kind or grant verification exists.
+
+## Specifications
+
+The protocol documents are the source of truth for wire format, validation
+rules and design rationale. The inventory, placement and spend documents end
+with a list of the decisions taken where an earlier draft was ambiguous.
+
+- [`docs/31632-game-item-definition-v2.md`](./docs/31632-game-item-definition-v2.md)
+- [`docs/31633-game-inventory.md`](./docs/31633-game-inventory.md)
+- [`docs/31634-game-item-placement.md`](./docs/31634-game-item-placement.md)
+- [`docs/1416-1417-game-inventory-spend.md`](./docs/1416-1417-game-inventory-spend.md)
+
+All four are marked `draft` and are maintained here together with the
+implementation. If a spec and the implementation disagree, please open an
+issue.
+
+## API overview
+
+Every export is listed in [`src/index.ts`](./src/index.ts). The same families
+exist for each kind.
+
+| Purpose             | Names                                                                                                                                                   |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Kind constants      | `KIND_GAME_ITEM_DEFINITION`, `KIND_GAME_INVENTORY`, `KIND_GAME_ITEM_PLACEMENT`, `KIND_GAME_INVENTORY_SPEND`, `KIND_GAME_INVENTORY_FOLD`                 |
+| Addresses           | `buildGameItemAddress`, `buildGameInventoryAddress`, `buildGameItemPlacementAddress`, their `parse*` counterparts, `getDTag`                            |
+| Parse and validate  | `parseGameX`, `parseGameXResult`, `validateGameX` for each of the five kinds                                                                            |
+| Build               | `buildGameXEvent` for each kind; `toBuildGameInventoryInput`, `toBuildGameItemPlacementInput` for lossless rewrites                                     |
+| Relay filters       | `buildGameXFilter` for each kind, `filterEventsByPlacementItemAddress`                                                                                  |
+| Inventory quantity  | `getInventoryItemQuantity`, `setInventoryItemQuantity`, `addInventoryItemQuantity`, `removeInventoryItemQuantity`, `removeInventoryItemQuantityChecked` |
+| Placement queries   | `getPlacementById`, `getPlacementsByItem`, `getPlacementsBySlot`, `getFirstEquippedPlacementBySlot`, `getLastEquippedPlacementBySlot`                   |
+| Placement mutations | `addPlacement`, `replacePlacement`, `removePlacement`, `setEquippedPlacementForSlot`, `removeEquippedPlacementFromSlot`                                 |
+| Item images         | `getPrimaryItemImage`, `getItemImageByMarker`, `getItemImagesByMarker`, `GAME_ITEM_IMAGE_MARKERS`                                                       |
+| Revisions           | `compareGameInventoryRevisions`, `compareGameItemPlacementRevisions`                                                                                    |
+| Spends and folds    | `deriveGameInventoryState`, `resolveGameInventoryFoldChain`, `resolveGameInventoryState`, `toBuildGameInventoryFoldInput`, `sortGameInventorySpends`    |
+| Type guards         | `isAddressPlacementTarget`, `isInternalPlacementTarget`, `isGameItemPlacement2DReference`, `isGameItemPlacementMode`, …                                 |
+
+Mutation helpers never modify their input and return a new top-level object.
+Inventory helpers copy the item list. Placement helpers deep-copy placement
+entries and recompute `itemAddresses`. Everything else is carried over by
+reference, so `content`, `contentJson`, `itemTags`, `targetTags` and `event`
+still describe the source event. Rebuild to regenerate them.
+
+## Development and testing
+
+Requires Node 18 or newer and pnpm (the version is pinned in `package.json`).
 
 ```bash
-pnpm run typecheck   # tsc --noEmit
-pnpm run lint        # eslint
-pnpm run format      # prettier --write
-pnpm run test        # vitest run
-pnpm run build       # tsup (ESM + CJS + d.ts)
-pnpm run check       # all of the above
+pnpm install
+pnpm run typecheck    # tsc --noEmit
+pnpm run lint         # eslint
+pnpm run format:check # prettier
+pnpm run test         # vitest run
+pnpm run build        # tsup: ESM + CJS + d.ts into dist/
+pnpm run check        # all of the above
 ```
 
-## Tooling
+Tests live in `test/` and run with vitest. Several of them are the numbered
+worked examples from the spend specification. CI (`.github/workflows/ci.yml`)
+runs the full `check` on pushes to `main` and on pull requests.
 
-- **pnpm** — package manager
-- **TypeScript** (strict) — language + typecheck
-- **tsup** (esbuild) — build to ESM + CJS + type declarations
-- **vitest** — tests
-- **ESLint** (typescript-eslint, type-checked) + **Prettier** — lint/format
+Layout:
 
-## License
+```text
+src/
+  index.ts               public exports
+  nostr/event.ts         NostrEvent and UnsignedEventTemplate
+  common/                addresses, tags, JSON content, ParseResult, shared checks
+  kinds/
+    game-item-definition/   kind 31632
+    game-inventory/         kind 31633
+    game-item-placement/    kind 31634
+    game-inventory-spend/   kind 1416
+    game-inventory-fold/    kind 1417
+docs/                    the protocol drafts
+test/                    vitest suites
+```
 
-MIT
+## Status and versioning
+
+The package is pre-1.0. The event kinds are draft specifications and may still
+change.
+
+## Changelog and license
+
+Release notes are in [CHANGELOG.md](./CHANGELOG.md). Licensed under the
+[MIT License](./LICENSE).
