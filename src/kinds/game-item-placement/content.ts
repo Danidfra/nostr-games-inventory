@@ -1,6 +1,11 @@
 import { parseAddressableEventAddress } from "../../common/address.js";
 import { isFiniteNumber } from "../../common/numbers.js";
-import { cloneJsonLike, isPlainObject } from "../../common/objects.js";
+import {
+  cloneJsonLike,
+  isPlainObject,
+  jsonNestingDepthExceeds,
+  MAX_JSON_NESTING_DEPTH,
+} from "../../common/objects.js";
 import { isBlank } from "../../common/strings.js";
 import { parseGameItemAddress } from "../game-item-definition/address.js";
 import { KIND_GAME_ITEM_DEFINITION } from "../../common/constants.js";
@@ -35,6 +40,17 @@ function invalid<T>(reason: string): ContentValidation<T> {
   return { ok: false, reason };
 }
 
+/**
+ * Structural limits applied to every untrusted value before any field is read
+ * or the value is copied. Returns an issue message, or `null`.
+ */
+function structuralIssue(value: unknown, label: string): string | null {
+  if (jsonNestingDepthExceeds(value, MAX_JSON_NESTING_DEPTH)) {
+    return `${label} is nested deeper than ${MAX_JSON_NESTING_DEPTH} levels`;
+  }
+  return null;
+}
+
 /** Options shared by the validators that resolve addresses. */
 export interface PlacementValidationOptions {
   /**
@@ -62,6 +78,10 @@ export function validatePlacementTargetValue(
 ): ContentValidation<GameItemPlacementTarget> {
   if (!isPlainObject(value)) {
     return invalid("`target` must be a JSON object");
+  }
+  const targetIssue = structuralIssue(value, "`target`");
+  if (targetIssue !== null) {
+    return invalid(targetIssue);
   }
 
   const type = value["type"];
@@ -114,6 +134,10 @@ export function validatePlacementReferenceValue(
 ): ContentValidation<GameItemPlacementReference> {
   if (!isPlainObject(value)) {
     return invalid("`reference` must be a JSON object");
+  }
+  const referenceIssue = structuralIssue(value, "`reference`");
+  if (referenceIssue !== null) {
+    return invalid(referenceIssue);
   }
 
   const space = value["space"];
@@ -204,6 +228,10 @@ export function validatePlacementEntryValue(
 ): ContentValidation<GameItemPlacementEntry> {
   if (!isPlainObject(value)) {
     return invalid("placement entry must be a JSON object");
+  }
+  const entryIssue = structuralIssue(value, "placement entry");
+  if (entryIssue !== null) {
+    return invalid(entryIssue);
   }
 
   const id = value["id"];

@@ -408,6 +408,8 @@ content.target is present and its known shape is malformed
 content.version or content.revision is present and is not a non-negative integer
 ```
 
+An implementation MAY additionally reject content whose structure exceeds a documented safety limit, since `content` is untrusted input from any publisher. The reference implementation rejects content that nests arrays and objects more than 64 levels deep (the document root counts as level 1; the deepest structure this specification defines, `placements[i].position`, sits at level 4). No document written to this specification comes near that limit.
+
 A client or library operating permissively SHOULD:
 
 ```text
