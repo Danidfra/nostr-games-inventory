@@ -167,3 +167,140 @@ describe("cloneJsonLike", () => {
     expect(copy.c.d).not.toBe(value.c.d);
   });
 });
+
+describe("__proto__ and other prototype-related keys (I2)", () => {
+  const protoEntry = `{"id":"p1","item":"${CARROT}","mode":"place","__proto__":{"layer":"NOT-A-NUMBER","slot":"","position":{"x":"evil"}}}`;
+  const goodEntry = `{"id":"p2","item":"${CARROT}","mode":"place","layer":2}`;
+
+  function assertPrototypeUntouched(): void {
+    const probe: Record<string, unknown> = {};
+    expect(probe["layer"]).toBeUndefined();
+    expect(probe["slot"]).toBeUndefined();
+    expect(probe["position"]).toBeUndefined();
+    expect(Object.getOwnPropertyNames(Object.prototype)).not.toContain("layer");
+  }
+
+  it("drops an entry with a top-level __proto__ key in permissive mode", () => {
+    const result = expectOk(
+      parseGameItemPlacementResult(
+        placementEvent(`{"placements":[${protoEntry},${goodEntry}]}`),
+      ),
+    );
+    expect(result.value.placements.map((e) => e.id)).toEqual(["p2"]);
+    expect(result.warnings.map((w) => w.code)).toContain(
+      "invalid-placement-entry",
+    );
+    // The surviving entry has an ordinary prototype and only own fields.
+    const entry = result.value.placements[0];
+    expect(Object.getPrototypeOf(entry)).toBe(Object.prototype);
+    expect(entry?.layer).toBe(2);
+    assertPrototypeUntouched();
+  });
+
+  it("rejects the event in strict mode", () => {
+    const result = parseGameItemPlacementResult(
+      placementEvent(`{"placements":[${protoEntry}]}`),
+      { mode: "strict" },
+    );
+    expect(result.ok).toBe(false);
+    assertPrototypeUntouched();
+  });
+
+  it("rejects __proto__ nested inside an entry field", () => {
+    const nested = `{"id":"p1","item":"${CARROT}","mode":"place","position":{"x":1,"y":2,"__proto__":{"z":"evil"}}}`;
+    const result = expectOk(
+      parseGameItemPlacementResult(
+        placementEvent(`{"placements":[${nested}]}`),
+      ),
+    );
+    expect(result.value.placements).toEqual([]);
+    const deeper = `{"id":"p1","item":"${CARROT}","mode":"place","metadata":{"a":[{"b":{"__proto__":{}}}]}}`;
+    expect(
+      parseGameItemPlacementResult(
+        placementEvent(`{"placements":[${deeper}]}`),
+        { mode: "strict" },
+      ).ok,
+    ).toBe(false);
+    assertPrototypeUntouched();
+  });
+
+  it("rejects a target with a __proto__ key and drops such a reference", () => {
+    const target = parseGameItemPlacementResult(
+      placementEvent(
+        `{"placements":[],"target":{"type":"internal","__proto__":{"id":"x"}}}`,
+      ),
+    );
+    expect(target.ok).toBe(false);
+
+    const reference = expectOk(
+      parseGameItemPlacementResult(
+        placementEvent(
+          `{"placements":[],"reference":{"space":"future","__proto__":{"space":"2d"}}}`,
+        ),
+      ),
+    );
+    expect(reference.value.reference).toBeUndefined();
+    expect(reference.warnings.map((w) => w.code)).toContain(
+      "invalid-reference",
+    );
+    assertPrototypeUntouched();
+  });
+
+  it("keeps a top-level __proto__ field as own data through a round trip", () => {
+    const event = placementEvent(
+      `{"placements":[${goodEntry}],"__proto__":{"placements":"evil"}}`,
+    );
+    const placement = expectOk(parseGameItemPlacementResult(event)).value;
+    expect(placement.placements.map((e) => e.id)).toEqual(["p2"]);
+
+    const input = toBuildGameItemPlacementInput(placement);
+    const extra = input.contentExtra as Record<string, unknown>;
+    expect(Object.getPrototypeOf(extra)).toBe(Object.prototype);
+    expect(Object.prototype.hasOwnProperty.call(extra, "__proto__")).toBe(true);
+    const rebuilt = buildGameItemPlacementEvent(input);
+    expect(rebuilt.content).toContain('"__proto__":{"placements":"evil"}');
+    assertPrototypeUntouched();
+  });
+
+  it("treats constructor and prototype as ordinary preserved keys", () => {
+    const entry = `{"id":"p1","item":"${CARROT}","mode":"place","constructor":{"name":"x"},"prototype":{"layer":"y"}}`;
+    const result = expectOk(
+      parseGameItemPlacementResult(
+        placementEvent(`{"placements":[${entry}]}`),
+        {
+          mode: "strict",
+        },
+      ),
+    );
+    const parsed = result.value.placements[0] as Record<string, unknown>;
+    expect(parsed["constructor"]).toEqual({ name: "x" });
+    expect(parsed["prototype"]).toEqual({ layer: "y" });
+    expect(parsed["layer"]).toBeUndefined();
+    expect(Object.getPrototypeOf(parsed)).toBe(Object.prototype);
+    assertPrototypeUntouched();
+  });
+
+  it("cloneJsonLike never changes a prototype", () => {
+    const source = JSON.parse('{"a":{"__proto__":{"polluted":true}}}') as {
+      a: Record<string, unknown>;
+    };
+    const copy = cloneJsonLike(source);
+    expect(Object.getPrototypeOf(copy.a)).toBe(Object.prototype);
+    expect(copy.a["polluted"]).toBeUndefined();
+    expect(Object.prototype.hasOwnProperty.call(copy.a, "__proto__")).toBe(
+      true,
+    );
+    expect(JSON.stringify(copy)).toBe(JSON.stringify(source));
+    assertPrototypeUntouched();
+  });
+
+  it("mutation helpers reject a caller entry carrying __proto__", () => {
+    const entry = JSON.parse(protoEntry) as Record<string, unknown>;
+    expect(() =>
+      buildGameItemPlacementEvent({
+        id: "room",
+        placements: [entry as never],
+      }),
+    ).toThrow(/__proto__/);
+  });
+});

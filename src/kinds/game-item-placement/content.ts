@@ -2,6 +2,7 @@ import { parseAddressableEventAddress } from "../../common/address.js";
 import { isFiniteNumber } from "../../common/numbers.js";
 import {
   cloneJsonLike,
+  containsProtoKey,
   isPlainObject,
   jsonNestingDepthExceeds,
   MAX_JSON_NESTING_DEPTH,
@@ -31,6 +32,12 @@ import type {
  *    defines; the returned value is a deep copy of the input, so unknown
  *    fields, unknown enum-like values and unknown nested structures are
  *    preserved exactly.
+ * 3. **Untrusted structure is bounded.** A value nested deeper than
+ *    `MAX_JSON_NESTING_DEPTH`, or carrying a `__proto__` key at any depth, is
+ *    malformed. `__proto__` is the one key that cannot be copied faithfully
+ *    by ordinary JavaScript assignment, so accepting it would let a consumer's
+ *    own `Object.assign` or merge resurrect unvalidated fields through the
+ *    prototype chain. `constructor` and `prototype` are ordinary keys.
  */
 
 export type ContentValidation<T> =
@@ -47,6 +54,9 @@ function invalid<T>(reason: string): ContentValidation<T> {
 function structuralIssue(value: unknown, label: string): string | null {
   if (jsonNestingDepthExceeds(value, MAX_JSON_NESTING_DEPTH)) {
     return `${label} is nested deeper than ${MAX_JSON_NESTING_DEPTH} levels`;
+  }
+  if (containsProtoKey(value)) {
+    return `${label} contains a \`__proto__\` key, which is not accepted`;
   }
   return null;
 }

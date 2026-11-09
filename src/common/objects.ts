@@ -74,6 +74,65 @@ export function jsonNestingDepthExceeds(
 }
 
 /**
+ * Set `record[key] = value` as an own data property, even for `__proto__`.
+ *
+ * Plain assignment of `__proto__` calls the inherited setter and replaces the
+ * prototype of `record` instead of storing a field. Every copy of untrusted
+ * keys in this library goes through here.
+ */
+export function setOwnProperty(
+  record: Record<string, unknown>,
+  key: string,
+  value: unknown,
+): void {
+  if (key === "__proto__") {
+    Object.defineProperty(record, key, {
+      value,
+      writable: true,
+      enumerable: true,
+      configurable: true,
+    });
+  } else {
+    record[key] = value;
+  }
+}
+
+/**
+ * `true` when any object inside a JSON-compatible value has an own
+ * `__proto__` key.
+ *
+ * `JSON.parse` turns `"__proto__"` into an ordinary own property, but code
+ * that copies it with plain assignment (`copy[key] = value`, `Object.assign`,
+ * many merge helpers) replaces the copy's prototype instead, so fields that
+ * failed validation can reappear as inherited properties. No document in this
+ * package's specifications uses the key. Iterative, like
+ * {@link jsonNestingDepthExceeds}.
+ */
+export function containsProtoKey(value: unknown): boolean {
+  const stack: unknown[] = [value];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    let children: unknown[];
+    if (Array.isArray(node)) {
+      children = node;
+    } else if (isPlainObject(node)) {
+      if (Object.prototype.hasOwnProperty.call(node, "__proto__")) {
+        return true;
+      }
+      children = Object.values(node);
+    } else {
+      continue;
+    }
+    for (const child of children) {
+      if (typeof child === "object" && child !== null) {
+        stack.push(child);
+      }
+    }
+  }
+  return false;
+}
+
+/**
  * Copy a JSON-compatible value structurally.
  *
  * This is how the library keeps its immutability promise for data it does not
@@ -85,6 +144,10 @@ export function jsonNestingDepthExceeds(
  * values are depth-checked by the validators before they get here; a caller
  * value nested deeper than an internal bound (in practice a cyclic structure)
  * throws a plain `Error`.
+ *
+ * Every own key is copied as an own data property. An own `__proto__` key
+ * stays an own property of the copy: it never changes the copy's prototype,
+ * and `Object.prototype` is never touched.
  *
  * Non-plain values (functions, class instances, `Date`, …) are returned by
  * reference. They cannot appear in content parsed from a Nostr event, and
@@ -127,7 +190,7 @@ export function cloneJsonLike<T>(value: T): T {
     } else {
       const record = target as Record<string, unknown>;
       for (const [key, entry] of Object.entries(source)) {
-        record[key] = shell(entry, depth + 1);
+        setOwnProperty(record, key, shell(entry, depth + 1));
       }
     }
   }

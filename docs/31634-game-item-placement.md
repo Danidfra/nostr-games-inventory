@@ -410,6 +410,8 @@ content.version or content.revision is present and is not a non-negative integer
 
 An implementation MAY additionally reject content whose structure exceeds a documented safety limit, since `content` is untrusted input from any publisher. The reference implementation rejects content that nests arrays and objects more than 64 levels deep (the document root counts as level 1; the deepest structure this specification defines, `placements[i].position`, sits at level 4). No document written to this specification comes near that limit.
 
+The key `__proto__` is not structurally safe in JavaScript: `JSON.parse` keeps it as an ordinary field, but copying it by assignment replaces the copy's prototype, so a field that failed validation can resurface as an inherited property. The reference implementation therefore treats a `target`, `reference` or placement entry that carries a `__proto__` key at any depth as malformed (an invalid target rejects the event; an invalid reference or entry follows the permissive and strict rules above). A `__proto__` key elsewhere in `content` is preserved as ordinary data. `constructor` and `prototype` are ordinary keys. Publishers MUST NOT use `__proto__` as a key.
+
 A client or library operating permissively SHOULD:
 
 ```text

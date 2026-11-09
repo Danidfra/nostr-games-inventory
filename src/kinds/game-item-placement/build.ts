@@ -6,7 +6,7 @@ import {
 import { serializeContent } from "../../common/json.js";
 import { isBlank } from "../../common/strings.js";
 import { isNonNegativeSafeInteger } from "../../common/numbers.js";
-import { cloneJsonLike } from "../../common/objects.js";
+import { cloneJsonLike, setOwnProperty } from "../../common/objects.js";
 import {
   PLACEMENT_ITEM_MARKER,
   PLACEMENT_TARGET_MARKER,
@@ -138,7 +138,7 @@ export function buildGameItemPlacementEvent(
         `buildGameItemPlacementEvent: \`contentExtra\` may not contain the builder-managed content key \`${key}\``,
       );
     }
-    content[key] = cloneJsonLike(value);
+    setOwnProperty(content, key, cloneJsonLike(value));
   }
 
   const preserved = input.preserveTags ?? [];
@@ -219,7 +219,7 @@ export function toBuildGameItemPlacementInput(
     if (MANAGED_CONTENT_KEYS.has(key)) {
       continue;
     }
-    contentExtra[key] = cloneJsonLike(value);
+    setOwnProperty(contentExtra, key, cloneJsonLike(value));
   }
 
   const result: BuildGameItemPlacementInput = {
