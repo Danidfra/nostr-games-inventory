@@ -1,4 +1,5 @@
 import type { NostrEvent } from "../../nostr/event.js";
+import { eventShapeIssue } from "../../common/event-shape.js";
 import { KIND_GAME_ITEM_DEFINITION } from "../../common/constants.js";
 import { getTagValue } from "../../common/tags.js";
 import { parseContentJson } from "../../common/json.js";
@@ -8,6 +9,7 @@ import { parseContentJson } from "../../common/json.js";
  */
 export interface ItemDefinitionValidationIssue {
   code:
+    | "malformed-event"
     | "wrong-kind"
     | "missing-d"
     | "empty-d"
@@ -57,6 +59,11 @@ export function validateGameItemDefinition(
   options: ItemDefinitionValidationOptions = {},
 ): ItemDefinitionValidationResult {
   const issues: ItemDefinitionValidationIssue[] = [];
+  const shapeIssue = eventShapeIssue(event);
+  if (shapeIssue !== null) {
+    issues.push({ code: "malformed-event", message: shapeIssue });
+    return { valid: false, issues };
+  }
 
   if (event.kind !== KIND_GAME_ITEM_DEFINITION) {
     issues.push({

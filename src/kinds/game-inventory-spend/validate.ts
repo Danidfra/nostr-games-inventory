@@ -1,4 +1,5 @@
 import type { NostrEvent } from "../../nostr/event.js";
+import { eventShapeIssue } from "../../common/event-shape.js";
 import {
   KIND_GAME_INVENTORY_SPEND,
   KIND_GAME_INVENTORY,
@@ -11,6 +12,7 @@ import { INVENTORY_MARKER } from "../game-inventory/address.js";
 import { SPEND_ITEM_MARKER, SPEND_QUANTITY_TAG } from "./constants.js";
 
 export type SpendValidationIssueCode =
+  | "malformed-event"
   | "wrong-kind"
   | "missing-event-id"
   | "invalid-event-id"
@@ -66,6 +68,12 @@ export function validateGameInventorySpend(
   options: SpendValidationOptions = {},
 ): SpendValidationResult {
   const issues: SpendValidationIssue[] = [];
+  const shapeIssue = eventShapeIssue(event);
+  if (shapeIssue !== null) {
+    issues.push({ code: "malformed-event", message: shapeIssue });
+    return { valid: false, issues };
+  }
+
   const requireHexPubkey = options.requireHexPubkey ?? false;
 
   if (event.kind !== KIND_GAME_INVENTORY_SPEND) {

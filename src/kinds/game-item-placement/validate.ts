@@ -1,4 +1,5 @@
 import type { NostrEvent } from "../../nostr/event.js";
+import { eventShapeIssue } from "../../common/event-shape.js";
 import { KIND_GAME_ITEM_PLACEMENT } from "../../common/constants.js";
 import { getTagValue } from "../../common/tags.js";
 import { parseContentJson } from "../../common/json.js";
@@ -19,6 +20,7 @@ import {
  */
 export interface ItemPlacementValidationIssue {
   code:
+    | "malformed-event"
     | "wrong-kind"
     | "missing-d"
     | "empty-d"
@@ -72,6 +74,11 @@ export function validateGameItemPlacement(
   options: ItemPlacementValidationOptions = {},
 ): ItemPlacementValidationResult {
   const issues: ItemPlacementValidationIssue[] = [];
+  const shapeIssue = eventShapeIssue(event);
+  if (shapeIssue !== null) {
+    issues.push({ code: "malformed-event", message: shapeIssue });
+    return { valid: false, issues };
+  }
 
   if (event.kind !== KIND_GAME_ITEM_PLACEMENT) {
     issues.push({

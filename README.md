@@ -142,7 +142,10 @@ a non-integer amount, an `extraTags` entry that collides with a builder-managed
 tag. Data conditions return structured results, for example
 `removeInventoryItemQuantityChecked` returns
 `{ ok: false, reason: "insufficient-quantity", available, requested }` where
-`removeInventoryItemQuantity` clamps at zero.
+`removeInventoryItemQuantity` clamps at zero. Parsers and validators never
+throw on event data: an event that is not NIP-01-shaped (not an object, an
+empty or non-string `pubkey`, `tags` that are not arrays of strings, a
+non-string `content`) is rejected with the issue code `malformed-event`.
 
 **Unknown data survives.** Parsed structures keep unknown fields through index
 signatures, placement helpers copy entries with those fields intact, and a

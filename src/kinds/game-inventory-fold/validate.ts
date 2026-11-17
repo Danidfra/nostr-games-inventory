@@ -1,4 +1,5 @@
 import type { NostrEvent } from "../../nostr/event.js";
+import { eventShapeIssue } from "../../common/event-shape.js";
 import {
   KIND_GAME_INVENTORY_FOLD,
   KIND_GAME_INVENTORY,
@@ -13,6 +14,7 @@ import {
 } from "./constants.js";
 
 export type FoldValidationIssueCode =
+  | "malformed-event"
   | "wrong-kind"
   | "missing-event-id"
   | "invalid-event-id"
@@ -71,6 +73,12 @@ export function validateGameInventoryFold(
   options: FoldValidationOptions = {},
 ): FoldValidationResult {
   const issues: FoldValidationIssue[] = [];
+  const shapeIssue = eventShapeIssue(event);
+  if (shapeIssue !== null) {
+    issues.push({ code: "malformed-event", message: shapeIssue });
+    return { valid: false, issues };
+  }
+
   const requireHexPubkey = options.requireHexPubkey ?? false;
   const requireHexEventId = options.requireHexEventId ?? false;
 

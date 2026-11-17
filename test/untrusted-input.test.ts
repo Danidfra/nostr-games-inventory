@@ -4,6 +4,13 @@ import {
   validateGameItemPlacement,
   toBuildGameItemPlacementInput,
   buildGameItemPlacementEvent,
+  parseGameItemDefinitionResult,
+  parseGameInventoryResult,
+  parseGameInventorySpendResult,
+  parseGameInventoryFoldResult,
+  deriveGameInventoryState,
+  resolveGameInventoryFoldChain,
+  filterEventsByPlacementItemAddress,
   KIND_GAME_ITEM_PLACEMENT,
   type NostrEvent,
 } from "../src/index.js";
@@ -12,6 +19,14 @@ import {
   MAX_JSON_NESTING_DEPTH,
 } from "../src/common/objects.js";
 import { makeEvent, expectOk } from "./helpers.js";
+import {
+  FARM,
+  OWNER,
+  STRAWBERRY,
+  foldEvent,
+  snapshot,
+  spendEvent,
+} from "./spend-fixtures.js";
 
 /**
  * Adversarial input: values a hostile publisher can sign and relay. Every
@@ -302,5 +317,115 @@ describe("__proto__ and other prototype-related keys (I2)", () => {
         placements: [entry as never],
       }),
     ).toThrow(/__proto__/);
+  });
+});
+
+describe("malformed event shapes never throw (I7)", () => {
+  const PK = "a".repeat(64);
+  const bases: Record<string, NostrEvent> = {
+    definition: makeEvent({
+      kind: 31632,
+      pubkey: PK,
+      tags: [
+        ["d", "g:food:c"],
+        ["name", "C"],
+        ["type", "food"],
+      ],
+    }),
+    inventory: makeEvent({
+      kind: 31633,
+      pubkey: PK,
+      tags: [
+        ["d", "main"],
+        ["a", `31632:${PK}:g:food:c`, "", "1"],
+      ],
+    }),
+    placement: makeEvent({
+      kind: 31634,
+      pubkey: PK,
+      tags: [["d", "room"]],
+      content: '{"placements":[]}',
+    }),
+    spend: spendEvent({ id: "1".repeat(64), pubkey: OWNER }),
+    fold: foldEvent({ id: "2".repeat(64), spends: ["1".repeat(64)] }),
+  };
+  const parsers: Record<string, (event: NostrEvent) => { ok: boolean }> = {
+    definition: (e) => parseGameItemDefinitionResult(e),
+    inventory: (e) => parseGameInventoryResult(e),
+    placement: (e) => parseGameItemPlacementResult(e),
+    spend: (e) => parseGameInventorySpendResult(e),
+    fold: (e) => parseGameInventoryFoldResult(e),
+  };
+  const mutations: Record<string, (e: NostrEvent) => unknown> = {
+    "empty pubkey": (e) => ({ ...e, pubkey: "" }),
+    "whitespace pubkey": (e) => ({ ...e, pubkey: "  " }),
+    "numeric pubkey": (e) => ({ ...e, pubkey: 5 }),
+    "missing pubkey": (e) => ({ ...e, pubkey: undefined }),
+    "null tag": (e) => ({ ...e, tags: [...e.tags, null] }),
+    "string tag": (e) => ({ ...e, tags: [...e.tags, "t"] }),
+    "null tag element": (e) => ({ ...e, tags: [...e.tags, ["t", null]] }),
+    "numeric d value": (e) => ({
+      ...e,
+      tags: [["d", 5], ...e.tags.filter((t) => t[0] !== "d")],
+    }),
+    "missing tags": (e) => ({ ...e, tags: undefined }),
+    "object tags": (e) => ({ ...e, tags: {} }),
+    "numeric content": (e) => ({ ...e, content: 5 }),
+    "null content": (e) => ({ ...e, content: null }),
+    "null event": () => null,
+    "array event": () => [],
+  };
+
+  for (const [kind, base] of Object.entries(bases)) {
+    it(`${kind}: the unmutated fixture parses`, () => {
+      expect(parsers[kind]?.(base).ok).toBe(true);
+    });
+    for (const [name, mutate] of Object.entries(mutations)) {
+      it(`${kind}: ${name} returns ok:false`, () => {
+        const event = mutate(base) as NostrEvent;
+        let result: { ok: boolean } | undefined;
+        expect(() => {
+          result = parsers[kind]?.(event);
+        }).not.toThrow();
+        expect(result?.ok).toBe(false);
+      });
+    }
+  }
+
+  it("derivation and fold resolution report malformed events instead of throwing", () => {
+    const inventory = snapshot({ items: { [STRAWBERRY]: 2 } });
+    const good = spendEvent({ id: "3".repeat(64) });
+    const state = deriveGameInventoryState({
+      inventory,
+      spends: [
+        null as unknown as NostrEvent,
+        { ...good, id: "5".repeat(64), tags: [null] } as unknown as NostrEvent,
+        good,
+      ],
+    });
+    expect(state.applied.map((s) => s.id)).toEqual([good.id]);
+    expect(state.invalid).toHaveLength(2);
+
+    const resolution = resolveGameInventoryFoldChain({
+      inventoryAddress: FARM,
+      headFoldId: "4".repeat(64),
+      folds: [null as unknown as NostrEvent],
+      spends: [null as unknown as NostrEvent],
+    });
+    expect(resolution.status).toBe("unresolved");
+  });
+
+  it("filterEventsByPlacementItemAddress skips events without usable tags", () => {
+    const match = makeEvent({
+      kind: 31634,
+      tags: [["a", CARROT, "", "item"]],
+    });
+    const events = [
+      null,
+      { ...match, tags: undefined },
+      { ...match, tags: [null, "x"] },
+      match,
+    ] as unknown as NostrEvent[];
+    expect(filterEventsByPlacementItemAddress(events, CARROT)).toEqual([match]);
   });
 });

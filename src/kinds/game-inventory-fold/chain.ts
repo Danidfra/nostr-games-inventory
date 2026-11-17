@@ -237,7 +237,8 @@ export function resolveGameInventoryFoldChain(
 function indexById(events: readonly NostrEvent[]): Map<string, NostrEvent> {
   const byId = new Map<string, NostrEvent>();
   for (const event of events) {
-    const id = event.id;
+    const id =
+      typeof event === "object" && event !== null ? event.id : undefined;
     if (typeof id === "string" && !isBlank(id) && !byId.has(id)) {
       byId.set(id, event);
     }
