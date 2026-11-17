@@ -11,6 +11,8 @@ import {
   deriveGameInventoryState,
   resolveGameInventoryFoldChain,
   filterEventsByPlacementItemAddress,
+  validateGameInventorySpend,
+  validateGameInventoryFold,
   KIND_GAME_ITEM_PLACEMENT,
   type NostrEvent,
 } from "../src/index.js";
@@ -427,5 +429,71 @@ describe("malformed event shapes never throw (I7)", () => {
       match,
     ] as unknown as NostrEvent[];
     expect(filterEventsByPlacementItemAddress(events, CARROT)).toEqual([match]);
+  });
+});
+
+describe("created_at on kind:1416 and kind:1417 (I3)", () => {
+  const bad: unknown[] = [
+    NaN,
+    Infinity,
+    -1,
+    1.5,
+    "100",
+    null,
+    undefined,
+    1e300,
+  ];
+
+  it.each(bad)("rejects a spend with created_at %s", (createdAt) => {
+    const event = {
+      ...spendEvent({ id: "6".repeat(64) }),
+      created_at: createdAt,
+    } as unknown as NostrEvent;
+    const result = parseGameInventorySpendResult(event);
+    expect(result.ok).toBe(false);
+    expect(
+      validateGameInventorySpend(event).issues.map((i) => i.code),
+    ).toContain("invalid-created-at");
+  });
+
+  it.each(bad)("rejects a fold manifest with created_at %s", (createdAt) => {
+    const event = {
+      ...foldEvent({ id: "7".repeat(64), spends: ["6".repeat(64)] }),
+      created_at: createdAt,
+    } as unknown as NostrEvent;
+    expect(parseGameInventoryFoldResult(event).ok).toBe(false);
+    expect(
+      validateGameInventoryFold(event).issues.map((i) => i.code),
+    ).toContain("invalid-created-at");
+  });
+
+  it("accepts created_at 0", () => {
+    expect(
+      parseGameInventorySpendResult(
+        spendEvent({ id: "8".repeat(64), createdAt: 0 }),
+      ).ok,
+    ).toBe(true);
+  });
+
+  it("derives the same applied set for every input order when one spend has NaN created_at", () => {
+    const inventory = snapshot({ items: { [STRAWBERRY]: 1 } });
+    const nan: NostrEvent = {
+      ...spendEvent({ id: "3".repeat(64) }),
+      created_at: NaN,
+    };
+    const early = spendEvent({ id: "4".repeat(64), createdAt: 300 });
+    const late = spendEvent({ id: "5".repeat(64), createdAt: 250 });
+    const orders = [
+      [nan, early, late],
+      [early, nan, late],
+      [early, late, nan],
+      [late, early, nan],
+    ];
+    const applied = orders.map((spends) =>
+      deriveGameInventoryState({ inventory, spends }).applied.map((s) => s.id),
+    );
+    for (const result of applied) {
+      expect(result).toEqual([late.id]);
+    }
   });
 });

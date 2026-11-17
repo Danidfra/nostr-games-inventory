@@ -206,6 +206,7 @@ A client or library MUST reject a `kind:1416` event as a spend if any of the fol
 ```text
 kind is not 1416
 the event has no id
+created_at is not a non-negative integer
 there is not exactly one a tag marked inventory
 the inventory address is malformed or does not reference kind 31633
 event.pubkey is not the inventory address's owner pubkey
@@ -435,6 +436,7 @@ A client or library MUST reject a `kind:1417` event as a manifest if any of the 
 ```text
 kind is not 1417
 the event has no id
+created_at is not a non-negative integer
 there is not exactly one a tag marked inventory
 the inventory address is malformed or does not reference kind 31633
 event.pubkey is not the inventory address's owner pubkey

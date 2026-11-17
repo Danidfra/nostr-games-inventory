@@ -6,6 +6,7 @@ import {
 } from "../../common/constants.js";
 import { parseAddressableEventAddress } from "../../common/address.js";
 import { isBlank, isHex64 } from "../../common/strings.js";
+import { isNonNegativeSafeInteger } from "../../common/numbers.js";
 import { INVENTORY_MARKER } from "../game-inventory/address.js";
 import {
   FOLD_PREVIOUS_MARKER,
@@ -17,6 +18,7 @@ export type FoldValidationIssueCode =
   | "malformed-event"
   | "wrong-kind"
   | "missing-event-id"
+  | "invalid-created-at"
   | "invalid-event-id"
   | "missing-inventory-reference"
   | "duplicate-inventory-reference"
@@ -86,6 +88,15 @@ export function validateGameInventoryFold(
     issues.push({
       code: "wrong-kind",
       message: `Expected kind ${KIND_GAME_INVENTORY_FOLD}, got ${event.kind}`,
+    });
+  }
+
+  // `created_at` orders spends; NaN, strings, fractions and negatives would
+  // make that order depend on the input order (NaN compares false both ways).
+  if (!isNonNegativeSafeInteger(event.created_at)) {
+    issues.push({
+      code: "invalid-created-at",
+      message: `\`created_at\` must be a non-negative integer number of seconds: ${String(event.created_at)}`,
     });
   }
 
