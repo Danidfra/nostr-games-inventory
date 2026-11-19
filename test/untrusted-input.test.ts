@@ -497,3 +497,22 @@ describe("created_at on kind:1416 and kind:1417 (I3)", () => {
     }
   });
 });
+
+describe("large adversarial spend sets", () => {
+  it("deduplicates many relay copies in linear time and reports each id once", () => {
+    const inventory = snapshot({ items: { [STRAWBERRY]: 1 } });
+    const spends: NostrEvent[] = [];
+    for (let i = 0; i < 20_000; i++) {
+      const event = spendEvent({ id: i.toString(16).padStart(64, "0") });
+      spends.push(event, event);
+    }
+    const started = performance.now();
+    const state = deriveGameInventoryState({ inventory, spends });
+    const elapsed = performance.now() - started;
+    expect(state.duplicateSpendIds).toHaveLength(20_000);
+    expect(new Set(state.duplicateSpendIds).size).toBe(20_000);
+    expect(state.applied).toHaveLength(1);
+    // Generous bound: the quadratic version took about 20 s here.
+    expect(elapsed).toBeLessThan(5_000);
+  });
+});
