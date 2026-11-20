@@ -8,6 +8,46 @@ backward compatible.
 
 ## Unreleased
 
+Security hardening for untrusted events. No wire format, tag, kind or event
+shape changes; every event the 0.5.0 test suite parses still parses to
+byte-identical output (pinned by `test/compat-golden.test.ts`).
+
+### Fixed
+
+- **kind:31634: deeply nested content no longer crashes the parser.** A
+  placement entry nested about 1,800 levels deep made
+  `parseGameItemPlacementResult` (and `toBuildGameItemPlacementInput`) throw a
+  `RangeError`. Content nested deeper than 64 levels is now rejected with the
+  new validation issue `content-too-deep`; entry, target and reference values
+  over the limit are malformed. `cloneJsonLike` is iterative.
+- **kind:31634: a `__proto__` key can no longer smuggle unvalidated fields.**
+  Copying an own `"__proto__"` key by assignment replaced the copy's
+  prototype, so `layer`, `slot` or `position` could be inherited from
+  attacker data after validation (strict mode too). `Object.prototype` was
+  never modified; this was not global prototype pollution. Entries, targets
+  and references containing `__proto__` at any depth are now malformed;
+  elsewhere in `content` the key is kept as ordinary own data.
+- **All kinds: parsers return `ok: false` instead of throwing** on events that
+  are not NIP-01-shaped: a non-object event, an empty or non-string `pubkey`,
+  `tags` that are not arrays of strings, or a non-string `content`. New
+  validation issue code `malformed-event`. `deriveGameInventoryState`,
+  `resolveGameInventoryFoldChain` and `filterEventsByPlacementItemAddress`
+  tolerate the same input.
+- **kind:1416 / kind:1417: `created_at` must be a non-negative integer.** A
+  `NaN` `created_at` made the derived applied set depend on input order. New
+  validation issue code `invalid-created-at`; added to both MUST-reject lists.
+- **kind:1416: deduplicating many relay copies is linear.** 20,000 spends
+  delivered twice took about 20 s; it now takes well under a second.
+
+### Changed
+
+- CI runs with a read-only token, pins every action to a commit SHA and
+  audits runtime dependencies. `prepublishOnly` runs every check.
+- New `SECURITY.md` documents the trust boundaries and the distributed
+  integrity limits callers must handle.
+
+## 0.5.0
+
 Adds an append-only **cross-application spend model** on top of kind:31633:
 **kind:1416 Game Inventory Spend** and **kind:1417 Game Inventory Fold
 Manifest**. An application other than an inventory's designated writer can now
