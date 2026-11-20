@@ -249,6 +249,10 @@ Full rules, worked examples and the reasoning behind each decision are in
 
 ## Trust and concurrency boundaries
 
+[`SECURITY.md`](./SECURITY.md) covers untrusted-input limits, caller
+responsibilities and the distributed integrity limits (incomplete relay
+results, deletion requests, concurrent devices, equal timestamps) in detail.
+
 Things the library checks:
 
 - A spend or manifest is accepted only if `event.pubkey` equals the owner in
