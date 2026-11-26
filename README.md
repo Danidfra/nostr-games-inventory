@@ -142,7 +142,10 @@ a non-integer amount, an `extraTags` entry that collides with a builder-managed
 tag. Data conditions return structured results, for example
 `removeInventoryItemQuantityChecked` returns
 `{ ok: false, reason: "insufficient-quantity", available, requested }` where
-`removeInventoryItemQuantity` clamps at zero.
+`removeInventoryItemQuantity` clamps at zero. Parsers and validators never
+throw on event data: an event that is not NIP-01-shaped (not an object, an
+empty or non-string `pubkey`, `tags` that are not arrays of strings, a
+non-string `content`) is rejected with the issue code `malformed-event`.
 
 **Unknown data survives.** Parsed structures keep unknown fields through index
 signatures, placement helpers copy entries with those fields intact, and a
@@ -245,6 +248,10 @@ Full rules, worked examples and the reasoning behind each decision are in
 [`docs/1416-1417-game-inventory-spend.md`](./docs/1416-1417-game-inventory-spend.md).
 
 ## Trust and concurrency boundaries
+
+[`SECURITY.md`](./SECURITY.md) covers untrusted-input limits, caller
+responsibilities and the distributed integrity limits (incomplete relay
+results, deletion requests, concurrent devices, equal timestamps) in detail.
 
 Things the library checks:
 

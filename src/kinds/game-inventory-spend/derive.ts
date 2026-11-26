@@ -59,13 +59,19 @@ export function deriveGameInventoryState(
   // 1. Deduplicate by event id, keeping the first copy. Events without an id
   //    cannot be deduplicated; they fail validation below anyway.
   const seen = new Set<string>();
+  // Ordered list for the result, set for the membership test: a relay that
+  // returns many copies must not make this loop quadratic.
   const duplicateSpendIds: string[] = [];
+  const reportedDuplicates = new Set<string>();
   const distinct: NostrEvent[] = [];
   for (const event of input.spends) {
-    const id = event.id;
+    // Relay input is untrusted: a non-object reaches validation below and is
+    // reported as invalid instead of throwing here.
+    const id = isObject(event) ? event.id : undefined;
     if (typeof id === "string" && !isBlank(id)) {
       if (seen.has(id)) {
-        if (!duplicateSpendIds.includes(id)) {
+        if (!reportedDuplicates.has(id)) {
+          reportedDuplicates.add(id);
           duplicateSpendIds.push(id);
         }
         continue;
@@ -147,8 +153,8 @@ export function deriveGameInventoryState(
   // Invalid events last, in a deterministic order of their own.
   invalid.sort((a, b) =>
     compareGameInventorySpendOrder(
-      { createdAt: a.event.created_at, id: a.event.id ?? "" },
-      { createdAt: b.event.created_at, id: b.event.id ?? "" },
+      invalidOrderKey(a.event),
+      invalidOrderKey(b.event),
     ),
   );
   for (const entry of invalid) {
@@ -181,5 +187,29 @@ export function deriveGameInventoryState(
     ignored,
     invalid,
     duplicateSpendIds,
+  };
+}
+
+function isObject(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+/**
+ * Sort key for an event that failed validation. Its fields are untrusted: a
+ * missing or non-finite `created_at` sorts first and a non-string id counts as
+ * `""`, so the comparator stays consistent and never throws.
+ */
+function invalidOrderKey(event: unknown): { createdAt: number; id: string } {
+  if (!isObject(event)) {
+    return { createdAt: -Infinity, id: "" };
+  }
+  const createdAt = event["created_at"];
+  const id = event["id"];
+  return {
+    createdAt:
+      typeof createdAt === "number" && Number.isFinite(createdAt)
+        ? createdAt
+        : -Infinity,
+    id: typeof id === "string" ? id : "",
   };
 }

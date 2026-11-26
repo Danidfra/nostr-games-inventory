@@ -1,10 +1,15 @@
 import type { NostrEvent } from "../../nostr/event.js";
+import { eventShapeIssue } from "../../common/event-shape.js";
 import { KIND_GAME_ITEM_PLACEMENT } from "../../common/constants.js";
 import { getTagValue } from "../../common/tags.js";
 import { parseContentJson } from "../../common/json.js";
 import { isBlank } from "../../common/strings.js";
 import { isNonNegativeSafeInteger } from "../../common/numbers.js";
-import { isPlainObject } from "../../common/objects.js";
+import {
+  isPlainObject,
+  jsonNestingDepthExceeds,
+  MAX_JSON_NESTING_DEPTH,
+} from "../../common/objects.js";
 import {
   validatePlacementTargetValue,
   type PlacementValidationOptions,
@@ -15,11 +20,13 @@ import {
  */
 export interface ItemPlacementValidationIssue {
   code:
+    | "malformed-event"
     | "wrong-kind"
     | "missing-d"
     | "empty-d"
     | "invalid-json-content"
     | "invalid-content-shape"
+    | "content-too-deep"
     | "invalid-placements"
     | "invalid-target"
     | "invalid-version"
@@ -43,6 +50,9 @@ export interface ItemPlacementValidationResult {
  * - the `d` tag is missing, empty or whitespace-only;
  * - `content` is not valid JSON, or is JSON that is not an object (an array,
  *   `null`, a string or a number);
+ * - `content` nests arrays and objects deeper than 64 levels (a structural
+ *   limit on untrusted input, far beyond any document the specification
+ *   defines);
  * - `content.placements` is present but is not an array;
  * - `content.target` is present and its known shape is malformed;
  * - `content.version` or `content.revision` is present and is not a
@@ -64,6 +74,11 @@ export function validateGameItemPlacement(
   options: ItemPlacementValidationOptions = {},
 ): ItemPlacementValidationResult {
   const issues: ItemPlacementValidationIssue[] = [];
+  const shapeIssue = eventShapeIssue(event);
+  if (shapeIssue !== null) {
+    issues.push({ code: "malformed-event", message: shapeIssue });
+    return { valid: false, issues };
+  }
 
   if (event.kind !== KIND_GAME_ITEM_PLACEMENT) {
     issues.push({
@@ -99,6 +114,14 @@ export function validateGameItemPlacement(
     issues.push({
       code: "invalid-content-shape",
       message: "`content` JSON must be an object",
+    });
+    return { valid: false, issues };
+  }
+
+  if (jsonNestingDepthExceeds(parsed.value, MAX_JSON_NESTING_DEPTH)) {
+    issues.push({
+      code: "content-too-deep",
+      message: `\`content\` is nested deeper than ${MAX_JSON_NESTING_DEPTH} levels`,
     });
     return { valid: false, issues };
   }

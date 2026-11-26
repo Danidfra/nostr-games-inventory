@@ -192,7 +192,18 @@ export function filterEventsByPlacementItemAddress(
   events: readonly NostrEvent[],
   itemAddress: string,
 ): NostrEvent[] {
-  return events.filter((event) =>
-    event.tags.some((tag) => isPlacementItemTag(tag) && tag[1] === itemAddress),
+  // Relay results are untrusted: an event without a usable tag list simply
+  // does not match.
+  return events.filter(
+    (event) =>
+      typeof event === "object" &&
+      event !== null &&
+      Array.isArray(event.tags) &&
+      event.tags.some(
+        (tag) =>
+          Array.isArray(tag) &&
+          isPlacementItemTag(tag) &&
+          tag[1] === itemAddress,
+      ),
   );
 }

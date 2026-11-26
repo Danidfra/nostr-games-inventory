@@ -1,6 +1,12 @@
 import { parseAddressableEventAddress } from "../../common/address.js";
 import { isFiniteNumber } from "../../common/numbers.js";
-import { cloneJsonLike, isPlainObject } from "../../common/objects.js";
+import {
+  cloneJsonLike,
+  containsProtoKey,
+  isPlainObject,
+  jsonNestingDepthExceeds,
+  MAX_JSON_NESTING_DEPTH,
+} from "../../common/objects.js";
 import { isBlank } from "../../common/strings.js";
 import { parseGameItemAddress } from "../game-item-definition/address.js";
 import { KIND_GAME_ITEM_DEFINITION } from "../../common/constants.js";
@@ -26,6 +32,12 @@ import type {
  *    defines; the returned value is a deep copy of the input, so unknown
  *    fields, unknown enum-like values and unknown nested structures are
  *    preserved exactly.
+ * 3. **Untrusted structure is bounded.** A value nested deeper than
+ *    `MAX_JSON_NESTING_DEPTH`, or carrying a `__proto__` key at any depth, is
+ *    malformed. `__proto__` is the one key that cannot be copied faithfully
+ *    by ordinary JavaScript assignment, so accepting it would let a consumer's
+ *    own `Object.assign` or merge resurrect unvalidated fields through the
+ *    prototype chain. `constructor` and `prototype` are ordinary keys.
  */
 
 export type ContentValidation<T> =
@@ -33,6 +45,20 @@ export type ContentValidation<T> =
 
 function invalid<T>(reason: string): ContentValidation<T> {
   return { ok: false, reason };
+}
+
+/**
+ * Structural limits applied to every untrusted value before any field is read
+ * or the value is copied. Returns an issue message, or `null`.
+ */
+function structuralIssue(value: unknown, label: string): string | null {
+  if (jsonNestingDepthExceeds(value, MAX_JSON_NESTING_DEPTH)) {
+    return `${label} is nested deeper than ${MAX_JSON_NESTING_DEPTH} levels`;
+  }
+  if (containsProtoKey(value)) {
+    return `${label} contains a \`__proto__\` key, which is not accepted`;
+  }
+  return null;
 }
 
 /** Options shared by the validators that resolve addresses. */
@@ -62,6 +88,10 @@ export function validatePlacementTargetValue(
 ): ContentValidation<GameItemPlacementTarget> {
   if (!isPlainObject(value)) {
     return invalid("`target` must be a JSON object");
+  }
+  const targetIssue = structuralIssue(value, "`target`");
+  if (targetIssue !== null) {
+    return invalid(targetIssue);
   }
 
   const type = value["type"];
@@ -114,6 +144,10 @@ export function validatePlacementReferenceValue(
 ): ContentValidation<GameItemPlacementReference> {
   if (!isPlainObject(value)) {
     return invalid("`reference` must be a JSON object");
+  }
+  const referenceIssue = structuralIssue(value, "`reference`");
+  if (referenceIssue !== null) {
+    return invalid(referenceIssue);
   }
 
   const space = value["space"];
@@ -204,6 +238,10 @@ export function validatePlacementEntryValue(
 ): ContentValidation<GameItemPlacementEntry> {
   if (!isPlainObject(value)) {
     return invalid("placement entry must be a JSON object");
+  }
+  const entryIssue = structuralIssue(value, "placement entry");
+  if (entryIssue !== null) {
+    return invalid(entryIssue);
   }
 
   const id = value["id"];

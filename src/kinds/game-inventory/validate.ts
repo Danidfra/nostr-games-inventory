@@ -1,11 +1,17 @@
 import type { NostrEvent } from "../../nostr/event.js";
+import { eventShapeIssue } from "../../common/event-shape.js";
 import { KIND_GAME_INVENTORY } from "../../common/constants.js";
 import { getTagValue } from "../../common/tags.js";
 import { parseContentJson } from "../../common/json.js";
 import { isBlank } from "../../common/strings.js";
 
 export interface InventoryValidationIssue {
-  code: "wrong-kind" | "missing-d" | "empty-d" | "invalid-json-content";
+  code:
+    | "malformed-event"
+    | "wrong-kind"
+    | "missing-d"
+    | "empty-d"
+    | "invalid-json-content";
   message: string;
 }
 
@@ -40,6 +46,11 @@ export function validateGameInventory(
   options: InventoryValidationOptions = {},
 ): InventoryValidationResult {
   const issues: InventoryValidationIssue[] = [];
+  const shapeIssue = eventShapeIssue(event);
+  if (shapeIssue !== null) {
+    issues.push({ code: "malformed-event", message: shapeIssue });
+    return { valid: false, issues };
+  }
 
   if (event.kind !== KIND_GAME_INVENTORY) {
     issues.push({
